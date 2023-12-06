@@ -9,6 +9,7 @@ Stability   : develop
 -}
 module GeniusYield.TxBuilder.Run
     ( Wallet (..)
+    , WalletName
     , walletAddress
     , GYTxRunState (..)
     , GYTxMonadRun
