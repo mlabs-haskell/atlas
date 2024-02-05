@@ -68,7 +68,6 @@ import           GeniusYield.TxBuilder
 import           GeniusYield.Types
 import GeniusYield.TxBuilder.Clb (GYTxMonadClb, asClb, asRandClb, liftClb)
 import GeniusYield.Clb.Clb (testNoErrorsTraceClb, intToKeyPair, Clb)
-import GeniusYield.Clb.Clb qualified as Clb
 import GeniusYield.Clb.MockConfig (defaultBabbageClb)
 import qualified Cardano.Ledger.Api as L
 import qualified Test.Cardano.Ledger.Core.KeyPair as TL
@@ -510,6 +509,7 @@ withBalanceClb n a m = do
     new <- balanceClb a
     let diff = new `valueMinus` old
     gyLogDebug' "" $ printf "%s:\nold balance: %s\nnew balance: %s\ndiff: %s" n old new diff
+    -- gyLogDebug' "" $ pretty $ printf "%s:\nold balance: %s\nnew balance: %s\ndiff: %s" n old new diff
     return (b, diff)
 
 withWalletBalancesCheckClb :: [(Wallet, GYValue)] -> GYTxMonadClb a -> GYTxMonadClb a
