@@ -230,6 +230,7 @@ library
     , cardano-ledger-binary
     , cardano-ledger-pretty
     , cardano-slotting
+    , cardano-strict-containers
     , cardano-wallet-primitive
     , ouroboros-consensus
     , ouroboros-consensus-cardano
