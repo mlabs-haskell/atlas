@@ -20,6 +20,8 @@ module GeniusYield.Test.Utils
     , balance
     , withWalletBalanceCheck
     , addRefScript
+    , addRefInput
+    , waitUntilSlot
     , afterAllSucceed
     , feesFromLovelace
     , withMaxQCTests
@@ -40,7 +42,6 @@ import           Test.Tasty.HUnit (assertFailure, testCaseInfo)
 import           GeniusYield.Imports
 import           GeniusYield.TxBuilder
 import           GeniusYield.Types
-import GeniusYield.TxBuilder.Clb qualified as Clb
 import qualified Cardano.Api.Shelley as Api.S
 
 import GeniusYield.Test.Address
@@ -55,12 +56,13 @@ import Clb qualified (
   runClb,
   intToKeyPair,
   defaultBabbage,
+  waitSlot,
  )
 import qualified Cardano.Ledger.Api as L
 import qualified Test.Cardano.Ledger.Core.KeyPair as TL
 import Cardano.Ledger.Shelley.API (extractTx)
 import Cardano.Ledger.Babbage.Tx (AlonzoTx(body), BabbageTxBody (btbOutputs))
-import Cardano.Ledger.Babbage.TxBody (txOutScript)
+import Cardano.Ledger.Babbage.TxBody (txOutScript, txOutData)
 import qualified Data.Sequence.Strict as StrictSeq
 import qualified Cardano.Api                      as Api
 import Cardano.Ledger.Binary (Sized(sizedValue))
@@ -71,6 +73,7 @@ import PlutusTx
 import PlutusTx.Prelude qualified as PlutusTx
 import PlutusCore.Core (plcVersion100)
 import PlutusLedgerApi.V2.Contexts (ownCurrencySymbol)
+import Cardano.Ledger.Api.Tx.Body (getPlutusData)
 
 
 -------------------------------------------------------------------------------
@@ -231,9 +234,10 @@ walletPubKeyHash = fromJust . addressToPubKeyHash . walletAddress
 addRefScript :: GYAddress -> GYValidator 'PlutusV2 -> GYTxMonadClb (Maybe GYTxOutRef)
 addRefScript addr script = do
     let script' = validatorToScript script
-    (tx, txId) <- Clb.sendSkeleton' (mustHaveOutput (mkGYTxOutNoDatum addr mempty) { gyTxOutRefS = Just script' })
+    (tx, txId) <- sendSkeleton' (mustHaveOutput (mkGYTxOutNoDatum addr mempty) { gyTxOutRefS = Just script' })
     let outputs =  btbOutputs $ body $  extractTx $ Clb.getOnChainTx tx
 
+    -- TODO: factor out
     let index = StrictSeq.findIndexL
             (\o ->
                 let lsh = fmap (apiHashToPlutus . Api.ScriptHash) $ L.hashScript <$> (txOutScript . sizedValue) o
@@ -242,6 +246,34 @@ addRefScript addr script = do
             outputs
     return $ (Just . txOutRefFromApiTxIdIx (txIdToApi txId) . wordToApiIx . fromInteger) . toInteger =<< index
 
+-- | Adds an input (whose datum we'll refer later) and returns the reference to it.
+addRefInput:: Bool       -- ^ Whether to inline this datum? FIXME: do we need False case?
+           -> GYAddress  -- ^ Where to place this output?
+           -> GYDatum    -- ^ Our datum.
+           -> GYTxMonadClb (Maybe GYTxOutRef)
+addRefInput toInline addr dat = do
+    (tx, txId) <- sendSkeleton'
+        (mustHaveOutput $ GYTxOut
+            addr
+            mempty
+            (Just (dat, if toInline then GYTxOutUseInlineDatum else GYTxOutDontUseInlineDatum))
+            Nothing
+        )
+    gyLogDebug' "" $ printf "Added reference input with txId %s" txId
+
+    -- Now we need to find the output's index that contains the datum we are adding.
+    let outputs =  btbOutputs $ body $  extractTx $ Clb.getOnChainTx tx
+
+    let index = StrictSeq.findIndexL
+            (\o ->
+                -- FIXME: This is ugly!
+                let lsd = datumFromPlutus
+                            . Plutus2.Datum . fromJust . fromData @BuiltinData. getPlutusData
+                                <$> (txOutData . sizedValue) o
+                in lsd == Just dat
+            )
+            outputs
+    return $ (Just . txOutRefFromApiTxIdIx (txIdToApi txId) . wordToApiIx . fromInteger) . toInteger =<< index
 
 {- | Abstraction for explicitly building a Value representing the fees of a
      transaction.
@@ -286,7 +318,6 @@ withBalance n a m = do
     new <- balance a
     let diff = new `valueMinus` old
     gyLogDebug' "" $ printf "%s:\nold balance: %s\nnew balance: %s\ndiff: %s" n old new diff
-    -- gyLogDebug' "" $ pretty $ printf "%s:\nold balance: %s\nnew balance: %s\ndiff: %s" n old new diff
     return (b, diff)
 
 withWalletBalanceCheck :: [(Wallet, GYValue)] -> GYTxMonadClb a -> GYTxMonadClb a
@@ -296,3 +327,9 @@ withWalletBalanceCheck ((w, v) : xs) m = do
     unless (diff == v) $ do
         fail $ printf "expected balance difference of %s for wallet %s, but the actual difference was %s" v (walletName w) diff
     return b
+
+
+-- | Waits until a certain 'GYSlot'.
+-- Silently returns if the given slot is greater than the current slot.
+waitUntilSlot :: GYSlot -> GYTxMonadClb ()
+waitUntilSlot slot = liftClb $ Clb.waitSlot $ slotToApi slot

@@ -22,7 +22,7 @@ module GeniusYield.TxBuilder.Clb
     , sendSkeleton'
     -- , networkIdRun
     , dumpUtxoState
-    , gyMustFail
+    , mustFail
     ) where
 
 import qualified Cardano.Api                               as Api
@@ -178,8 +178,8 @@ liftClb = GYTxMonadClb . lift . lift . lift . lift
  error message or/and failure action name.
  FIXME: should we move it to CLB?
 -}
-gyMustFail :: GYTxMonadClb a -> GYTxMonadClb ()
-gyMustFail act = do
+mustFail :: GYTxMonadClb a -> GYTxMonadClb ()
+mustFail act = do
     (st, preFails) <- liftClb $ do
         st <- get
         preFails <- getFails
