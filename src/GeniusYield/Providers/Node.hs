@@ -10,12 +10,12 @@ Stability   : develop
 module GeniusYield.Providers.Node
     ( nodeSubmitTx
     , nodeSlotActions
-    , nodeQueryUTxO
     , nodeGetParameters
     -- * Low-level
-    , nodeGetCurrentSlot
+    , nodeGetSlotOfCurrentBlock
     , nodeUtxosAtAddress
-    , nodeSlotConfig
+    , nodeUtxoAtTxOutRef
+    , nodeUtxosAtTxOutRefs
     -- * Auxiliary
     , networkIdToLocalNodeConnectInfo
     ) where
@@ -30,6 +30,7 @@ import qualified Data.Text                                         as Txt
 import           Ouroboros.Network.Protocol.LocalTxSubmission.Type (SubmitResult (..))
 
 import           GeniusYield.CardanoApi.Query
+import           GeniusYield.Providers.Common                      (SubmitTxException (SubmitTxException))
 import           GeniusYield.TxBuilder.Errors
 import           GeniusYield.Types
 
@@ -43,39 +44,29 @@ nodeSubmitTx info tx = do
     res <- Api.submitTxToNodeLocal info $ Api.TxInMode (txToApi tx) Api.BabbageEraInCardanoMode
     case res of
         SubmitSuccess  -> return $ txIdFromApi $ Api.getTxId $ Api.getTxBody $ txToApi tx
-        SubmitFail err -> throwIO $ userError $ show err
+        SubmitFail err -> throwIO $ SubmitTxException $ Txt.pack $ show err
 
 -------------------------------------------------------------------------------
 -- Current slot
 -------------------------------------------------------------------------------
 
-nodeGetCurrentSlot :: Api.LocalNodeConnectInfo Api.CardanoMode -> IO GYSlot
-nodeGetCurrentSlot info = do
+nodeGetSlotOfCurrentBlock :: Api.LocalNodeConnectInfo Api.CardanoMode -> IO GYSlot
+nodeGetSlotOfCurrentBlock info = do
     Api.ChainTip s _ _ <- Api.getLocalChainTip info
     return $ slotFromApi s
 
 nodeSlotActions :: Api.LocalNodeConnectInfo Api.CardanoMode -> GYSlotActions
 nodeSlotActions info = GYSlotActions
-    { gyGetCurrentSlot'   = getCurrentSlot
-    , gyWaitForNextBlock' = gyWaitForNextBlockDefault getCurrentSlot
-    , gyWaitUntilSlot'    = gyWaitUntilSlotDefault getCurrentSlot
+    { gyGetSlotOfCurrentBlock' = getSlotOfCurrentBlock
+    , gyWaitForNextBlock'      = gyWaitForNextBlockDefault getSlotOfCurrentBlock
+    , gyWaitUntilSlot'         = gyWaitUntilSlotDefault getSlotOfCurrentBlock
     }
   where
-    getCurrentSlot = nodeGetCurrentSlot info
+    getSlotOfCurrentBlock = nodeGetSlotOfCurrentBlock info
 
 -------------------------------------------------------------------------------
 -- UTxO query
 -------------------------------------------------------------------------------
-
-nodeQueryUTxO :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> GYQueryUTxO
-nodeQueryUTxO era info = GYQueryUTxO
-    { gyQueryUtxosAtTxOutRefs'           = nodeUtxosAtTxOutRefs era info
-    , gyQueryUtxosAtTxOutRefsWithDatums' = Nothing  -- Will use the default implementation.
-    , gyQueryUtxoAtTxOutRef'             = nodeUtxoAtTxOutRef era info
-    , gyQueryUtxoRefsAtAddress'          = gyQueryUtxoRefsAtAddressDefault $ nodeUtxosAtAddress era info
-    , gyQueryUtxosAtAddresses'           = gyQueryUtxoAtAddressesDefault $ nodeUtxosAtAddress era info
-    , gyQueryUtxosAtAddressesWithDatums' = Nothing  -- Will use the default implementation.
-    }
 
 nodeUtxosAtAddress :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> GYAddress -> IO GYUTxOs
 nodeUtxosAtAddress era info addr = queryUTxO era info $ Api.QueryUTxOByAddress $ Set.singleton $ addressToApi addr
@@ -121,24 +112,6 @@ eraHistory :: Api.LocalNodeConnectInfo Api.CardanoMode -> IO (Api.EraHistory Api
 eraHistory info = queryCardanoMode info $ Api.QueryEraHistory Api.CardanoModeIsMultiEra
 
 -------------------------------------------------------------------------------
--- Slot configuration
--------------------------------------------------------------------------------
-
-genesisParameters :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> IO Api.GenesisParameters
-genesisParameters GYAlonzo  info = queryAlonzoEra  info Api.QueryGenesisParameters
-genesisParameters GYBabbage info = queryBabbageEra info Api.QueryGenesisParameters
-
--- | Return 'GYSlotConfig', from which we can estimate what the currentSlot should be.
-nodeSlotConfig :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> IO GYSlotConfig
-nodeSlotConfig era info = do
-    gp <- genesisParameters era info
-
-    let slotLength = Api.protocolParamSlotLength gp
-    let slotZero   = Api.protocolParamSystemStart gp
-
-    return $ simpleSlotConfig slotZero slotLength
-
--------------------------------------------------------------------------------
 -- Auxiliary functions
 -------------------------------------------------------------------------------
 
@@ -150,5 +123,5 @@ networkIdToLocalNodeConnectInfo :: GYNetworkId                              -- ^
 networkIdToLocalNodeConnectInfo nid nodeSocket = Api.LocalNodeConnectInfo
     { localConsensusModeParams = Api.CardanoModeParams $ networkIdToEpochSlots nid
     , localNodeNetworkId       = networkIdToApi nid
-    , localNodeSocketPath      = nodeSocket
+    , localNodeSocketPath      = Api.File nodeSocket
     }

@@ -9,7 +9,7 @@ Stability   : develop
 
 {-# LANGUAGE LambdaCase #-}
 
-module GeniusYield.Test.Privnet.Examples.Gift (tests) where
+module GeniusYield.Test.Privnet.Examples.Gift (tests, resolveRefScript, resolveRefScript') where
 
 import qualified Cardano.Api                      as Api
 import qualified Cardano.Api.Shelley              as Api.S
@@ -90,7 +90,7 @@ tests setup = testGroup "gift"
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts  @'PlutusV1 giftValidatorV2
+        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts  @'PlutusV2 giftValidatorV2
         mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx'
 
         balance1' <- ctxQueryBalance ctx (ctxUserF ctx)
@@ -124,7 +124,7 @@ tests setup = testGroup "gift"
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts  @'PlutusV1 giftValidatorV2
+        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts  @'PlutusV2 giftValidatorV2
         mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx'
 
         balance1' <- ctxQueryBalance ctx (ctxUserF ctx)
@@ -161,11 +161,11 @@ tests setup = testGroup "gift"
         threadDelay 1_000_000
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser)
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
 
         ---------- New user tries to grab it, since interacting with script, needs to give collateral
-        grabGiftsTxBody <- ctxRunF ctx newUser $ grabGifts  @'PlutusV1 giftValidatorV2
+        grabGiftsTxBody <- ctxRunF ctx newUser $ grabGifts  @'PlutusV2 giftValidatorV2
         grabGiftsTxBody' <- case grabGiftsTxBody of
           Nothing   -> assertFailure "Unable to build tx"
           Just body -> return body
@@ -193,7 +193,7 @@ tests setup = testGroup "gift"
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue True
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser)
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
         fiveAdaUtxo <- case find (\u -> utxoValue u == collateralValue) (utxosToList newUserUtxos) of
                          Nothing           -> fail "Couldn't find a 5-ada-only UTxO"
@@ -206,31 +206,34 @@ tests setup = testGroup "gift"
 
     , testCaseSteps "Checking for 'BuildTxNoSuitableCollateral' error when no UTxO is greater than or equal to maximum possible total collateral" $ \info -> withSetup setup info $ \ctx -> do
         ----------- Create a new user and fund it
-        let newUserValue = maximumRequiredCollateralValue `valueMinus` valueFromLovelace 1
+        pp <- gyGetProtocolParameters (ctxProviders ctx)
+        let newUserValue = maximumRequiredCollateralValue pp `valueMinus` valueFromLovelace 1
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue False
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser)
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
         assertThrown (\case BuildTxNoSuitableCollateral -> True; _anyOther -> False) $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (valueFromLovelace 1_000_000)
 
     , testCaseSteps "Checking for 'BuildTxNoSuitableCollateral' error when UTxO is greater than or equal to maximum possible total collateral but resulting return collateral doesn't satisfy minimum ada requirement" $ \info -> withSetup setup info $ \ctx -> do
+        pp <- gyGetProtocolParameters (ctxProviders ctx)
         ----------- Create a new user and fund it
-        let newUserValue = maximumRequiredCollateralValue <> valueFromLovelace 0_500_000
+        let newUserValue = maximumRequiredCollateralValue pp <> valueFromLovelace 0_500_000
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue False
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser)
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
         assertThrown (\case BuildTxNoSuitableCollateral -> True; _anyOther -> False) $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (valueFromLovelace 1_000_000)
 
     , testCaseSteps "No 'BuildTxNoSuitableCollateral' error is thrown when collateral input is sufficient" $ \info -> withSetup setup info $ \ctx -> do
+        pp <- gyGetProtocolParameters (ctxProviders ctx)
         ----------- Create a new user and fund it
-        let newUserValue = maximumRequiredCollateralValue <> valueFromLovelace 1_500_000
+        let newUserValue = maximumRequiredCollateralValue pp <> valueFromLovelace 1_500_000
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue False
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser)
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
         void $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (valueFromLovelace 1_000_000)
 
@@ -241,7 +244,7 @@ tests setup = testGroup "gift"
         txBody <- ctxRunI ctx (ctxUserF ctx) $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (valueFromLovelace 8_000_000)
         void $ submitTx ctx (ctxUserF ctx) txBody
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser)
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
         eightAdaUtxo <- case find (\u -> utxoValue u == valueFromLovelace 8_000_000) (utxosToList newUserUtxos) of
                           Nothing -> fail "Couldn't find a 8-ada-only UTxO"
@@ -256,14 +259,7 @@ tests setup = testGroup "gift"
 
         txBodyRefScript <- ctxRunI ctx (ctxUserF ctx) $ addRefScript' (validatorToScript giftValidatorV2)
 
-        ref <- do
-          let refs = findRefScriptsInBody txBodyRefScript
-          ref <- case Map.lookup (Some (validatorToScript giftValidatorV2)) refs of
-              Just ref -> return ref
-              Nothing  -> fail "Shouldn't happen: no ref in body"
-
-          void $ submitTx ctx (ctxUserF ctx) txBodyRefScript
-          return ref
+        ref <- resolveRefScript' ctx txBodyRefScript (Some (validatorToScript giftValidatorV2))
 
         info $ "Reference at " ++ show ref
 
@@ -289,17 +285,7 @@ tests setup = testGroup "gift"
         --
         -- 3c6ad9c5c512c06add1cd6bb513f1e879d5cadbe70f4762d4ff810d37ab9e0c0     1        1081810 lovelace + TxOutDatumHash ScriptDataInBabbageEra "923918e403bf43c34b4ef6b48eb2ee04babed17320d8d1b9ff9ad086e86f44ec"
         txBodyRefScript <- ctxRunF ctx (ctxUserF ctx) $ addRefScript (validatorToScript giftValidatorV2)
-
-        ref <- case txBodyRefScript of
-            Left ref   -> return ref
-            Right body -> do
-                let refs = findRefScriptsInBody body
-                ref <- case Map.lookup (Some (validatorToScript giftValidatorV2)) refs of
-                    Just ref -> return ref
-                    Nothing  -> fail "Shouldn't happen: no ref in body"
-
-                void $ submitTx ctx (ctxUserF ctx) body
-                return ref
+        ref <- resolveRefScript ctx txBodyRefScript (Some (validatorToScript giftValidatorV2))
 
         info $ "Reference at " ++ show ref
 
@@ -348,17 +334,7 @@ tests setup = testGroup "gift"
         --
         -- 3c6ad9c5c512c06add1cd6bb513f1e879d5cadbe70f4762d4ff810d37ab9e0c0     1        1081810 lovelace + TxOutDatumHash ScriptDataInBabbageEra "923918e403bf43c34b4ef6b48eb2ee04babed17320d8d1b9ff9ad086e86f44ec"
         txBodyRefScript <- ctxRunF ctx (ctxUserF ctx) $ addRefScript (validatorToScript giftValidatorV2)
-
-        ref <- case txBodyRefScript of
-            Left ref   -> return ref
-            Right body -> do
-                let refs = findRefScriptsInBody body
-                ref <- case Map.lookup (Some (validatorToScript giftValidatorV2)) refs of
-                    Just ref -> return ref
-                    Nothing  -> fail "Shouldn't happen: no ref in body"
-
-                void $ submitTx ctx (ctxUserF ctx) body
-                return ref
+        ref <- resolveRefScript ctx txBodyRefScript (Some (validatorToScript giftValidatorV2))
 
         info $ "Reference at " ++ show ref
 
@@ -410,17 +386,7 @@ tests setup = testGroup "gift"
         --
         -- 3c6ad9c5c512c06add1cd6bb513f1e879d5cadbe70f4762d4ff810d37ab9e0c0     1        1081810 lovelace + TxOutDatumHash ScriptDataInBabbageEra "923918e403bf43c34b4ef6b48eb2ee04babed17320d8d1b9ff9ad086e86f44ec"
         txBodyRefScript <- ctxRunF ctx (ctxUserF ctx) $ addRefScript (validatorToScript giftValidatorV2)
-
-        ref <- case txBodyRefScript of
-            Left ref   -> return ref
-            Right body -> do
-                let refs = findRefScriptsInBody body
-                ref <- case Map.lookup (Some (validatorToScript giftValidatorV2)) refs of
-                    Just ref -> return ref
-                    Nothing  -> fail "Shouldn't happen: no ref in body"
-
-                void $ submitTx ctx (ctxUserF ctx) body
-                return ref
+        ref <- resolveRefScript ctx txBodyRefScript (Some (validatorToScript giftValidatorV2))
 
         info $ "Reference at " ++ show ref
 
@@ -494,13 +460,6 @@ tests setup = testGroup "gift"
         -- i.e. words we need to make the previous test "inline datums V1+V2" not work:
         -- - we cannot consume V1 script utxos (we know the version!)
         -- - and create outputs with inline datums in the same transaction.
-        --
-        -- TODO: change gyTxOutDatumInline field to a GADT which can be "true" only when transaction is "V2 scripts only" #25
-        --       (https://github.com/geniusyield/atlas/issues/25)
-        --
-        -- TODO: later these tests fail due NonOutputSupplimentaryDatums. The reason is wrong grabGifts.
-        --       We should use GyTxInDatum True there for datums #26
-        --       (https://github.com/geniusyield/atlas/issues/26)
         --
         let ironAC = ctxIron ctx
 
@@ -611,7 +570,7 @@ grabGifts
     -> m (Maybe (GYTxSkeleton u))
 grabGifts validator = do
     addr <- scriptAddress validator
-    utxo <- utxosAtAddress addr
+    utxo <- utxosAtAddress addr Nothing
     datums <- utxosDatums utxo
 
     if null datums
@@ -635,7 +594,7 @@ grabGiftsRef
     -> m (Maybe (GYTxSkeleton 'PlutusV2))
 grabGiftsRef ref validator = do
     addr <- scriptAddress validator
-    utxo <- utxosAtAddress addr
+    utxo <- utxosAtAddress addr Nothing
     datums <- utxosDatums utxo
 
     if null datums
@@ -666,3 +625,19 @@ checkCollateral inputValue returnValue totalCollateralLovelace txFee collPer =
   && balanceLovelace>= ceiling (txFee * collPer % 100)  -- Api checks via `balanceLovelace * 100 >= txFee * collPer` which IMO works as `balanceLovelace` is an integer & 100 but in general `c >= ceil (a / b)` is not equivalent to `c * b >= a`.
   && inputValue == returnValue <> valueFromLovelace totalCollateralLovelace
   where (balanceLovelace, balanceOther) = valueSplitAda $ inputValue `valueMinus` returnValue
+
+resolveRefScript :: Ctx -> Either GYTxOutRef GYTxBody -> Some GYScript -> IO GYTxOutRef
+resolveRefScript ctx txBodyRefScript script =
+  case txBodyRefScript of
+    Left ref   -> return ref
+    Right body -> resolveRefScript' ctx body script
+
+resolveRefScript' :: Ctx -> GYTxBody -> Some GYScript -> IO GYTxOutRef
+resolveRefScript' ctx txBodyRefScript script = do
+  let refs = findRefScriptsInBody txBodyRefScript
+  ref <- case Map.lookup script refs of
+      Just ref -> return ref
+      Nothing  -> fail "Shouldn't happen: no ref in body"
+
+  void $ submitTx ctx (ctxUserF ctx) txBodyRefScript
+  return ref

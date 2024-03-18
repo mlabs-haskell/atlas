@@ -21,6 +21,8 @@ module GeniusYield.Types.UTxO (
     utxosRemoveTxOutRef,
     utxosRemoveTxOutRefs,
     utxosRemoveRefScripts,
+    utxosRemoveUTxO,
+    utxosRemoveUTxOs,
     utxosLookup,
     someTxOutRef,
     randomTxOutRef,
@@ -52,7 +54,7 @@ import qualified Cardano.Api                as Api
 import qualified Cardano.Api.Shelley        as Api.S
 import           Control.Monad.Random       (MonadRandom (getRandomR))
 import qualified Data.Map.Strict            as Map
-import qualified Plutus.V2.Ledger.Tx        as Plutus
+import qualified PlutusLedgerApi.V2.Tx      as Plutus
 import qualified Text.Printf                as Printf
 
 import           Data.Maybe                 (isNothing)
@@ -88,7 +90,7 @@ data GYUTxO = GYUTxO
     , utxoAddress   :: !GYAddress
     , utxoValue     :: !GYValue
     , utxoOutDatum  :: !GYOutDatum
-    , utxoRefScript :: !(Maybe (Some GYScript)) -- TODO: change to GYScriptHash? #31, but then we won't be able to convert faithfully back to Api.UTxO (https://github.com/geniusyield/atlas/issues/31)
+    , utxoRefScript :: !(Maybe (Some GYScript))
     } deriving stock (Eq, Show)
 
 instance Ord GYUTxO where
@@ -199,6 +201,14 @@ utxosRemoveTxOutRefs orefs (GYUTxOs m) = GYUTxOs $ Map.withoutKeys m orefs
 -- | Remove UTxOs containing reference scripts inside them from 'GYUTxOs'.
 utxosRemoveRefScripts :: GYUTxOs -> GYUTxOs
 utxosRemoveRefScripts = filterUTxOs $ isNothing . utxoRefScript
+
+-- | Remove particular 'GYUTxO' from 'GYUTxOs'.
+utxosRemoveUTxO :: GYUTxO -> GYUTxOs -> GYUTxOs
+utxosRemoveUTxO utxo = utxosRemoveTxOutRef (utxoRef utxo)
+
+-- | Given two 'GYUTxOs', returns elements from the first one, not present in the second one.
+utxosRemoveUTxOs :: GYUTxOs -> GYUTxOs -> GYUTxOs
+utxosRemoveUTxOs (GYUTxOs m) (GYUTxOs m') = GYUTxOs $ m Map.\\ m'
 
 -- | Lookup a UTxO given a ref.
 utxosLookup :: GYTxOutRef -> GYUTxOs -> Maybe GYUTxO

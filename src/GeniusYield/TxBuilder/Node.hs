@@ -61,7 +61,7 @@ data GYTxNodeEnv = GYTxNodeEnv
     , envProviders     :: !GYProviders
     , envAddrs         :: ![GYAddress]
     , _envChangeAddr   :: !GYAddress
-    , envCollateral    :: !(Maybe GYTxOutRef)
+    , envCollateral    :: !(Maybe GYUTxO)
     , envUsedSomeUTxOs :: !(Set GYTxOutRef)
     }
 
@@ -79,14 +79,23 @@ instance GYTxQueryMonad GYTxMonadNode where
     lookupDatum h = GYTxMonadNode $ \env ->
         gyLookupDatum (envProviders env) h
 
-    utxosAtAddress addr = GYTxMonadNode $ \env ->
-        gyQueryUtxosAtAddress (envProviders env) addr
+    utxosAtAddress addr mAssetClass = GYTxMonadNode $ \env ->
+        gyQueryUtxosAtAddress (envProviders env) addr mAssetClass
 
     utxosAtAddresses addrs = GYTxMonadNode $ \env ->
         gyQueryUtxosAtAddresses (envProviders env) addrs
 
+    utxosAtAddressWithDatums addr mAssetClass = GYTxMonadNode $ \env ->
+        gyQueryUtxosAtAddressWithDatums (envProviders env) addr mAssetClass
+
+    utxosAtPaymentCredential cred = GYTxMonadNode $ \env ->
+        gyQueryUtxosAtPaymentCredential (envProviders env) cred
+
     utxosAtAddressesWithDatums addrs = GYTxMonadNode $ \env ->
         gyQueryUtxosAtAddressesWithDatums (envProviders env) addrs
+
+    utxosAtPaymentCredentialWithDatums cred = GYTxMonadNode $ \env ->
+        gyQueryUtxosAtPaymentCredWithDatums (envProviders env) cred
 
     utxoRefsAtAddress addr = GYTxMonadNode $ \env ->
         gyQueryUtxoRefsAtAddress (envProviders env) addr
@@ -103,8 +112,8 @@ instance GYTxQueryMonad GYTxMonadNode where
     slotConfig = GYTxMonadNode $ \env ->
         gyGetSlotConfig (envProviders env)
 
-    currentSlot = GYTxMonadNode $ \env ->
-        gyGetCurrentSlot (envProviders env)
+    slotOfCurrentBlock = GYTxMonadNode $ \env ->
+        gyGetSlotOfCurrentBlock (envProviders env)
 
     logMsg ns s msg = GYTxMonadNode $ \env ->
         gyLog (envProviders env) ns s msg
@@ -121,7 +130,7 @@ instance GYTxMonad GYTxMonadNode where
         mCollateral   <- getCollateral
         usedSomeUTxOs <- getUsedSomeUTxOs
         utxos         <- utxosAtAddresses addrs
-        return $ utxosRemoveTxOutRefs (maybe usedSomeUTxOs (`Set.insert` usedSomeUTxOs) mCollateral) utxos
+        return $ utxosRemoveTxOutRefs (maybe usedSomeUTxOs ((`Set.insert` usedSomeUTxOs) . utxoRef) mCollateral) utxos
       where
         getCollateral    = GYTxMonadNode $ return . envCollateral
         getUsedSomeUTxOs = GYTxMonadNode $ return . envUsedSomeUTxOs
@@ -309,9 +318,13 @@ runGYTxMonadNodeCore ownUtxoUpdateF cstrat nid providers addrs change collateral
     pp          <- gyGetProtocolParameters providers
     ps          <- gyGetStakePools providers
 
+    bpp <- case Api.bundleProtocolParams Api.BabbageEra pp of
+                Left e     -> throwIO $ BuildTxPPConversionError e
+                Right bpp' -> pure bpp'
+
     collateral' <- obtainCollateral
 
-    e <- unGYTxMonadNode (buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change collateral' loggedAction) GYTxNodeEnv
+    e <- unGYTxMonadNode (buildTxCore ss eh bpp ps cstrat ownUtxoUpdateF addrs change collateral' loggedAction) GYTxNodeEnv
             { envNid           = nid
             , envProviders     = providers
             , envAddrs         = addrs
@@ -324,14 +337,12 @@ runGYTxMonadNodeCore ownUtxoUpdateF cstrat nid providers addrs change collateral
         Right res -> return res
 
     where
-      obtainCollateral :: IO (Maybe GYTxOutRef)
+      obtainCollateral :: IO (Maybe GYUTxO)
       obtainCollateral = runMaybeT $ do
         (collateralRef, toCheck) <- hoistMaybe collateral
-        if not toCheck then return collateralRef
-        else do
-          collateralUtxo <- liftIO $ runGYTxQueryMonadNode nid providers $ utxoAtTxOutRef' collateralRef
-          if utxoValue collateralUtxo == collateralValue then return collateralRef
-          else hoistMaybe Nothing
+        collateralUtxo <- liftIO $ runGYTxQueryMonadNode nid providers $ utxoAtTxOutRef' collateralRef
+        if not toCheck || (utxoValue collateralUtxo == collateralValue) then return collateralUtxo
+        else hoistMaybe Nothing
 
       loggedAction :: GYTxMonadNode [f (GYTxSkeleton v)]
       loggedAction = action >>= \skeletons -> logSkeletons skeletons

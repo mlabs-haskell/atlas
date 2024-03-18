@@ -19,8 +19,12 @@ module GeniusYield.TxBuilder.Common
 
 import qualified Cardano.Api                    as Api
 import qualified Cardano.Api.Shelley            as Api.S
+import           Control.Applicative            ((<|>))
 import           Data.List.NonEmpty             (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty             as NE
+import qualified Data.Map.Strict                as Map
+import           Data.Ratio                     ((%))
+import qualified Data.Set                       as Set
 
 import           GeniusYield.Imports
 import           GeniusYield.Transaction
@@ -61,13 +65,13 @@ buildTxCore
     :: forall m f v. (GYTxQueryMonad m, MonadRandom m, Traversable f)
     => Api.SystemStart
     -> Api.EraHistory Api.CardanoMode
-    -> Api.S.ProtocolParameters
+    -> Api.S.BundledProtocolParameters Api.S.BabbageEra
     -> Set Api.S.PoolId
     -> GYCoinSelectionStrategy
     -> (GYTxBody -> GYUTxOs -> GYUTxOs)
     -> [GYAddress]
     -> GYAddress
-    -> Maybe GYTxOutRef  -- ^ Is `Nothing` if there was no 5 ada collateral returned by browser wallet.
+    -> Maybe GYUTxO  -- ^ Is `Nothing` if there was no 5 ada collateral returned by browser wallet.
     -> m [f (GYTxSkeleton v)]
     -> m (Either BuildTxException (GYTxBuildResult f))
 buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change reservedCollateral action = do
@@ -79,67 +83,85 @@ buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change reservedCollateral ac
             , gyBTxEnvEraHistory     = eh
             , gyBTxEnvProtocolParams = pp
             , gyBTxEnvPools          = ps
-            , gyBTxEnvOwnUtxos       = utxosRemoveTxOutRefs refIns $ utxosRemoveRefScripts $ maybe ownUtxos' (`utxosRemoveTxOutRef` ownUtxos') reservedCollateral
+            , gyBTxEnvOwnUtxos       = utxosRemoveTxOutRefs refIns $ utxosRemoveRefScripts $ maybe ownUtxos' ((`utxosRemoveTxOutRef` ownUtxos') . utxoRef) reservedCollateral
             , gyBTxEnvChangeAddr     = change
             , gyBTxEnvCollateral     = collateralUtxo
             }
 
         helper :: GYUTxOs -> GYTxSkeleton v -> m (Either BuildTxException GYTxBody)
         helper ownUtxos' GYTxSkeleton {..} = do
-            let gytxMint' :: Maybe (GYValue, [(Some GYMintingPolicy, GYRedeemer)])
-                gytxMint' | null gytxMint = Nothing
-                    | otherwise = Just
-                    ( valueFromList [ (GYToken (mintingPolicyId mp) tn, n) | (Some mp, (tokens, _)) <- itoList gytxMint, (tn, n) <- itoList tokens ]
-                    , [(mp, redeemer) | (mp, (_, redeemer)) <- itoList gytxMint]
-                    )
+            let gytxMint' :: Maybe (GYValue, [(GYMintScript v, GYRedeemer)])
+                gytxMint'
+                  | null gytxMint = Nothing
+                  | otherwise =
+                      Just
+                        ( valueFromList [ (GYToken (mintingPolicyIdFromWitness mp) tn, n) | (mp, (tokens, _)) <- itoList gytxMint, (tn, n) <- itoList tokens ]
+                        , [(mp, redeemer) | (mp, (_, redeemer)) <- itoList gytxMint]
+                        )
 
-            -- Convert the 'GYTxIn's to 'GYTxInDetailed's by fetching chain information about them.
-            gyInUtxos       <- utxosAtTxOutRefs $ gyTxInTxOutRef <$> gytxIns
+            let refIns =
+                     gyTxSkeletonRefInsToList gytxRefIns
+                  <> [r | GYTxIn { gyTxInWitness = GYTxInWitnessScript (GYInReference r _) _ _ } <- gytxIns]
+                  <> [r | GYMintReference r _ <- Map.keys gytxMint]
+            allRefUtxos <- utxosAtTxOutRefs $
+                 (gyTxInTxOutRef <$> gytxIns)
+              <> refIns
+            refInsUtxos <- forM refIns $ \refIn -> do
+              case utxosLookup refIn allRefUtxos of
+                Nothing -> throwError . GYQueryUTxOException $ GYNoUtxoAtRef refIn
+                Just u  -> pure u
+            -- Convert the 'GYTxIn's to 'GYTxInDetailed's from fetched chain information about them.
             gyTxInsDetailed <- forM gytxIns $ \gyTxIn -> do
                 let ref = gyTxInTxOutRef gyTxIn
-                case utxosLookup ref gyInUtxos of
+                case utxosLookup ref allRefUtxos of
                     Nothing                                                           -> throwError . GYQueryUTxOException $ GYNoUtxoAtRef ref
-                    Just GYUTxO {utxoAddress, utxoValue, utxoRefScript, utxoOutDatum} -> pure $
-                        GYTxInDetailed gyTxIn utxoAddress utxoValue utxoRefScript (isInlineDatum utxoOutDatum)
+                    Just GYUTxO {utxoAddress, utxoValue, utxoRefScript, utxoOutDatum} ->
+                      if checkDatumMatch utxoOutDatum $ gyTxInWitness gyTxIn then
+                        pure $
+                          GYTxInDetailed gyTxIn utxoAddress utxoValue utxoOutDatum utxoRefScript
+                      else throwError $ GYDatumMismatch utxoOutDatum gyTxIn
+                      where
+                        checkDatumMatch _ GYTxInWitnessKey = True
+                        checkDatumMatch ud (GYTxInWitnessScript _ wd _) = case ud of
+                          GYOutDatumNone       -> False
+                          GYOutDatumHash h     -> h == hashDatum wd
+                          GYOutDatumInline uid -> uid == wd
 
-            refInsUtxos <- utxosAtTxOutRefs $ gyTxSkeletonRefInsToList gytxRefIns
 
             -- This operation is `O(n)` where `n` denotes the number of UTxOs in `ownUtxos'`.
-            mCollateralUtxo <-
-              maybe
-                ( return $
+            let mCollateralUtxo =
+                  reservedCollateral <|>
                     find
                       (\u ->
                         let v = utxoValue u
+                            maximumRequiredCollateralValue' = maximumRequiredCollateralValue $ Api.S.unbundleProtocolParams pp
                             -- Following depends on that we allow unsafe, i.e., negative coins count below. In future, we can take magnitude instead.
-                            vWithoutMaxCollPledge = v `valueMinus` maximumRequiredCollateralValue
+                            vWithoutMaxCollPledge = v `valueMinus` maximumRequiredCollateralValue'
                             worstCaseCollOutput = mkGYTxOutNoDatum change vWithoutMaxCollPledge
                             -- @vWithoutMaxCollPledge@ should satisfy minimum ada requirement.
                         in
-                             v `valueGreaterOrEqual` maximumRequiredCollateralValue
+                            v `valueGreaterOrEqual` maximumRequiredCollateralValue'
                           && minimumUTxO pp worstCaseCollOutput <= fromInteger (valueAssetClass vWithoutMaxCollPledge GYLovelace)
                       )  -- Keeping it simple.
                       (utxosToList ownUtxos')
-
-                ) (fmap Just . utxoAtTxOutRef') reservedCollateral
 
             case mCollateralUtxo of
               Nothing -> return (Left BuildTxNoSuitableCollateral)
               Just collateralUtxo ->
                 -- Build the transaction.
                 buildUnsignedTxBody
-                    (buildEnvWith ownUtxos' (gyTxSkeletonRefInsSet gytxRefIns) collateralUtxo)
+                    (buildEnvWith ownUtxos' (Set.fromList refIns) collateralUtxo)
                     cstrat
                     gyTxInsDetailed
                     gytxOuts
-                    refInsUtxos
+                    (utxosFromList refInsUtxos)
                     gytxMint'
                     gytxInvalidBefore
                     gytxInvalidAfter
                     gytxSigs
 
         go :: GYUTxOs -> GYTxBuildResult f -> [f (GYTxSkeleton v)] -> m (Either BuildTxException  (GYTxBuildResult f))
-        go _         acc []           = pure $ Right $ reverseResult acc
+        go _         acc []             = pure $ Right $ reverseResult acc
         go ownUtxos' acc (fbody : rest) = do
             res <- sequence <$> traverse (helper ownUtxos') fbody
             case res of
@@ -189,14 +211,26 @@ collateralLovelace = 5_000_000
 collateralValue :: GYValue
 collateralValue = valueFromLovelace collateralLovelace
 
--- | See `maximumRequiredCollateralValue`.
-maximumRequiredCollateralLovelace :: Integer
-maximumRequiredCollateralLovelace = 3_700_000
-
+{-# INLINABLE maximumRequiredCollateralLovelace #-}
 -- | What is the maximum possible collateral requirement as per current protocol parameters?
---
--- __NOTE:__ This value would need to be updated if we ever see update in protocol parameters.
---
--- Currently this is set to @3.7@ ada as maximum transaction fees possible currently is \(44 \times 16384 + 155381 + 10000000000 \times (721 / 10000000) + 14000000 \times (577 / 10000)  = 2405077\). Multiplying this by \(1.5\) (for collateral percentage) and taking ceil, gives us \(3607616\) lovelaces.
-maximumRequiredCollateralValue :: GYValue
-maximumRequiredCollateralValue = valueFromLovelace maximumRequiredCollateralLovelace
+maximumRequiredCollateralLovelace :: Api.S.ProtocolParameters -> Integer
+maximumRequiredCollateralLovelace pp@Api.S.ProtocolParameters {..} = ceiling $ fromIntegral (maximumFee pp) * maybe 0 (% 100) protocolParamCollateralPercent
+
+{-# INLINABLE maximumFee #-}
+-- | Compute the maximum fee possible for any transaction.
+maximumFee :: Api.S.ProtocolParameters -> Integer
+maximumFee Api.S.ProtocolParameters {..} =
+  let txFee :: Integer
+      txFee = fromIntegral $ protocolParamTxFeeFixed + protocolParamTxFeePerByte * fromIntegral protocolParamMaxTxSize
+      executionFee :: Rational
+      executionFee =
+        case (protocolParamPrices, protocolParamMaxTxExUnits) of
+          (Just Api.S.ExecutionUnitPrices{..}, Just Api.S.ExecutionUnits{..}) ->
+            priceExecutionSteps * fromIntegral executionSteps + priceExecutionMemory * fromIntegral executionMemory
+          _ -> 0
+   in txFee + ceiling executionFee
+
+{-# INLINABLE maximumRequiredCollateralValue #-}
+-- | See `maximumRequiredCollateralLovelace`.
+maximumRequiredCollateralValue :: Api.S.ProtocolParameters -> GYValue
+maximumRequiredCollateralValue pp = valueFromLovelace $ maximumRequiredCollateralLovelace pp

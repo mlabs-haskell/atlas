@@ -57,10 +57,20 @@ instance GYTxQueryMonad GYTxQueryMonadNode where
       GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
         gyLookupDatum providers h
 
-    utxosAtAddress addr = do
+    utxosAtAddress addr mAssetClass = do
       logMsg mempty GYInfo $ printf "Querying utxo At Address: %s" addr
       GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
-        gyQueryUtxosAtAddress providers addr
+        gyQueryUtxosAtAddress providers addr mAssetClass
+
+    utxosAtAddressWithDatums addr mAssetClass = do
+      logMsg mempty GYInfo $ printf "Querying utxos (with datums) at address: %s" addr
+      GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
+        gyQueryUtxosAtAddressWithDatums providers addr mAssetClass
+
+    utxosAtPaymentCredential cred = do
+      logMsg mempty GYInfo $ printf "Querying UTxOs at payment credential: %s" cred
+      GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
+        gyQueryUtxosAtPaymentCredential providers cred
 
     utxosAtAddresses addrs = do
       logMsg mempty GYInfo $ printf "Querying utxos At Addresses: \n %s" (show addrs)
@@ -71,6 +81,11 @@ instance GYTxQueryMonad GYTxQueryMonadNode where
       logMsg mempty GYInfo $ printf "Querying utxos (with datums) At Addresses: \n %s" (show addrs)
       GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
         gyQueryUtxosAtAddressesWithDatums providers addrs
+
+    utxosAtPaymentCredentialWithDatums cred = do
+      logMsg mempty GYInfo $ printf "Querying utxos (with datums) at credential: \n %s" (show cred)
+      GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
+        gyQueryUtxosAtPaymentCredWithDatums providers cred
 
     utxoRefsAtAddress addr = do
       logMsg mempty GYInfo $ printf "Querying UtxoRefs At Address: %s"  addr
@@ -95,8 +110,8 @@ instance GYTxQueryMonad GYTxQueryMonadNode where
     slotConfig = GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
         gyGetSlotConfig providers
 
-    currentSlot = GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
-        gyGetCurrentSlot providers
+    slotOfCurrentBlock = GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
+        gyGetSlotOfCurrentBlock providers
 
     logMsg ns s msg = GYTxQueryMonadNode $ \(GYTxNodeEnv _ providers) ->
         gyLog providers ns s msg
