@@ -90,11 +90,13 @@ import qualified Data.Swagger                     as Swagger
 import qualified Data.Swagger.Internal.Schema     as Swagger
 import qualified Data.Text                        as T
 import qualified Data.Text.Encoding               as TE
-import qualified Plutus.V1.Ledger.Value           as Plutus
+import qualified PlutusLedgerApi.V1.Value         as Plutus
 import qualified Text.Printf                      as Printf
 import qualified Web.HttpApiData                  as Web
 
 
+import           Data.Either.Combinators          (mapLeft)
+import           Data.Hashable                    (Hashable (..))
 import qualified GeniusYield.Imports              as TE
 import qualified GeniusYield.Types.Ada            as Ada
 import           GeniusYield.Types.Script
@@ -124,7 +126,8 @@ data GYFromPlutusValueError
 
 -- | Value: a (total) map from asset classes ('GYAssetClass') to amount ('Integer').
 newtype GYValue = GYValue (Map.Map GYAssetClass Integer)
-  deriving (Eq)
+  deriving Eq
+  deriving newtype Ord
 
 -- | Check the 'GYValue' representation invariants.
 --
@@ -283,7 +286,7 @@ assetPairToKV ac i = K.fromText (f ac) .= i
 -- >>> Aeson.decode @GYValue "{\"ff80aaaf03a273b8f5c558168dc0e2377eea810badbae6eceefc14ef.474f4c44\":101,\"lovelace\":22}"
 -- Just (valueFromList [(GYLovelace,22),(GYToken "ff80aaaf03a273b8f5c558168dc0e2377eea810badbae6eceefc14ef" "GOLD",101)])
 --
-instance Aeson.FromJSON GYValue where
+instance Aeson.FromJSON GYValue where  -- TODO: Do we need this? Can't this be derived from newtype?
   parseJSON = Aeson.withObject "GYValue" $ \km ->
     case KM.toList km of
         [] -> pure $ valueMake mempty
@@ -413,7 +416,14 @@ isEmptyValue (GYValue m) = Map.null m
 data GYAssetClass = GYLovelace | GYToken GYMintingPolicyId GYTokenName
   deriving stock (Show, Eq, Ord, Generic)
 
-instance Aeson.ToJSONKey GYAssetClass
+instance Hashable GYAssetClass where
+    hashWithSalt salt ac = hashWithSalt salt $ Web.toUrlPiece ac
+
+instance Aeson.ToJSONKey GYAssetClass where
+    toJSONKey = Aeson.toJSONKeyText Web.toUrlPiece
+
+instance Aeson.FromJSONKey GYAssetClass where
+    fromJSONKey = Aeson.FromJSONKeyTextParser (either (fail . show) pure . Web.parseUrlPiece)
 
 instance Swagger.ToSchema GYAssetClass where
   declareNamedSchema _ = do
@@ -441,7 +451,7 @@ assetClassFromPlutus (Plutus.AssetClass (cs, tn))
     | cs == Ada.adaSymbol, tn == Ada.adaToken  = Right GYLovelace
     | otherwise                                = do
         tn' <- maybe (Left $ GYTokenNameTooBig tn) Right $ tokenNameFromPlutus tn
-        cs' <- maybe (Left $ GYInvalidPolicyId cs) Right . Api.deserialiseFromRawBytes Api.AsScriptHash $
+        cs' <- mapLeft (\_ -> GYInvalidPolicyId cs) . Api.deserialiseFromRawBytes Api.AsScriptHash $
             case cs of Plutus.CurrencySymbol bs -> fromBuiltin bs
         return (GYToken (mintingPolicyIdFromApi (Api.PolicyId cs')) tn')
 
@@ -680,6 +690,9 @@ instance Web.FromHttpApiData GYTokenName where
 
 tokenNameToHex :: GYTokenName -> Text
 tokenNameToHex (GYTokenName bs ) = TE.decodeUtf8 $ Base16.encode bs
+
+-- >>> tokenNameToPlutus "GOLD"
+-- "GOLD"
 
 tokenNameToPlutus :: GYTokenName -> Plutus.TokenName
 tokenNameToPlutus (GYTokenName bs) = Plutus.TokenName (toBuiltin bs)

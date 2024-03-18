@@ -48,9 +48,11 @@ module GeniusYield.TxBuilder.Class
     , utxosDatums
     , utxosDatumsPure
     , utxoDatum
+    , utxoDatumPure
     , utxoDatumHushed
     , utxoDatumPureHushed
     , utxoDatum'
+    , utxoDatumPure'
     , mustHaveInput
     , mustHaveRefInput
     , mustHaveOutput
@@ -76,8 +78,11 @@ import qualified Data.Map.Strict              as Map
 import           Data.Maybe                   (listToMaybe)
 import qualified Data.Set                     as Set
 import qualified Data.Text                    as Txt
-import qualified Plutus.V1.Ledger.Api         as Plutus
-import qualified Plutus.V1.Ledger.Value       as PlutusValue
+import qualified PlutusLedgerApi.V1           as Plutus (Address, DatumHash,
+                                                         FromData (..),
+                                                         PubKeyHash, TokenName,
+                                                         TxOutRef, Value)
+import qualified PlutusLedgerApi.V1.Value     as Plutus (AssetClass)
 
 import           GeniusYield.Imports
 import           GeniusYield.TxBuilder.Errors
@@ -89,7 +94,7 @@ import           GeniusYield.Types
 
 -- | Class of monads for querying chain data.
 class MonadError GYTxMonadException m => GYTxQueryMonad m where
-    {-# MINIMAL networkId, lookupDatum, (utxoAtTxOutRef | utxosAtTxOutRefs), (utxosAtAddress | utxosAtAddresses), slotConfig, currentSlot, logMsg #-}
+    {-# MINIMAL networkId, lookupDatum, (utxoAtTxOutRef | utxosAtTxOutRefs), utxosAtAddress, utxosAtPaymentCredential, slotConfig, slotOfCurrentBlock, logMsg #-}
 
     -- | Get the network id
     networkId :: m GYNetworkId
@@ -119,15 +124,18 @@ class MonadError GYTxMonadException m => GYTxQueryMonad m where
     utxosAtTxOutRefsWithDatums = gyQueryUtxosAtTxOutRefsWithDatumsDefault utxosAtTxOutRefs lookupDatum
 
     -- | Lookup 'GYUTxOs' at 'GYAddress'.
-    utxosAtAddress :: GYAddress -> m GYUTxOs
-    utxosAtAddress = utxosAtAddresses . return
+    utxosAtAddress :: GYAddress -> Maybe GYAssetClass -> m GYUTxOs
+
+    -- | Lookup 'GYUTxO' at given 'GYAddress' with their datums. This has a default implementation using `utxosAtAddress` and `lookupDatum` but should be overridden for efficiency if provider provides suitable option.
+    utxosAtAddressWithDatums :: GYAddress -> Maybe GYAssetClass -> m [(GYUTxO, Maybe GYDatum)]
+    utxosAtAddressWithDatums = gyQueryUtxosAtAddressWithDatumsDefault utxosAtAddress lookupDatum
 
     -- | Lookup 'GYUTxOs' at zero or more 'GYAddress'.
     utxosAtAddresses :: [GYAddress] -> m GYUTxOs
     utxosAtAddresses = foldM f mempty
       where
         f :: GYUTxOs -> GYAddress -> m GYUTxOs
-        f utxos addr = (<> utxos) <$> utxosAtAddress addr
+        f utxos addr = (<> utxos) <$> utxosAtAddress addr Nothing
 
     -- | Lookup UTxOs at zero or more 'GYAddress' with their datums. This has a default implementation using `utxosAtAddresses` and `lookupDatum` but should be overridden for efficiency if provider provides suitable option.
     utxosAtAddressesWithDatums :: [GYAddress] -> m [(GYUTxO, Maybe GYDatum)]
@@ -135,7 +143,14 @@ class MonadError GYTxMonadException m => GYTxQueryMonad m where
 
     -- | Lookup the `[GYTxOutRef]`s at a `GYAddress`
     utxoRefsAtAddress :: GYAddress -> m [GYTxOutRef]
-    utxoRefsAtAddress = fmap (Map.keys . mapUTxOs id) . utxosAtAddress
+    utxoRefsAtAddress = fmap (Map.keys . mapUTxOs id) . flip utxosAtAddress Nothing
+
+    -- | Lookup 'GYUTxOs' at 'GYPaymentCredential'.
+    utxosAtPaymentCredential :: GYPaymentCredential -> m GYUTxOs
+
+    -- | Lookup UTxOs at given 'GYPaymentCredential' with their datums. This has a default implementation using `utxosAtPaymentCredential` and `lookupDatum` but should be overridden for efficiency if provider provides suitable option.
+    utxosAtPaymentCredentialWithDatums :: GYPaymentCredential -> m [(GYUTxO, Maybe GYDatum)]
+    utxosAtPaymentCredentialWithDatums = gyQueryUtxosAtPaymentCredWithDatumsDefault utxosAtPaymentCredential lookupDatum
 
     {- | Obtain the slot config for the network.
 
@@ -143,8 +158,10 @@ class MonadError GYTxMonadException m => GYTxQueryMonad m where
     -}
     slotConfig :: m GYSlotConfig
 
-    -- | Lookup the current 'GYSlot'.
-    currentSlot :: m GYSlot
+    -- | This is expected to give the slot of the latest block. We say "expected" as we cache the result for 5 seconds, that is to say, suppose slot was cached at time @T@, now if query for current block's slot comes within time duration @(T, T + 5)@, then we'll return the cached slot but if say, query happened at time @(T + 5, T + 21)@ where @21@ was taken as an arbitrary number above 5, then we'll query the chain tip and get the slot of the latest block seen by the provider and then store it in our cache, thus new cached value would be served for requests coming within time interval of @(T + 21, T + 26)@.
+    --
+    -- __NOTE:__ It's behaviour is slightly different, solely for our plutus simple model provider where it actually returns the value of the @currentSlot@ variable maintained inside plutus simple model library.
+    slotOfCurrentBlock :: m GYSlot
 
     -- | Log a message with specified namespace and severity.
     logMsg :: HasCallStack => GYLogNamespace -> GYLogSeverity -> String -> m ()
@@ -172,12 +189,15 @@ instance GYTxQueryMonad m => GYTxQueryMonad (RandT g m) where
     utxoAtTxOutRef = lift . utxoAtTxOutRef
     utxosAtTxOutRefs = lift . utxosAtTxOutRefs
     utxosAtTxOutRefsWithDatums = lift . utxosAtTxOutRefsWithDatums
-    utxosAtAddress = lift . utxosAtAddress
+    utxosAtAddress addr = lift . utxosAtAddress addr
+    utxosAtAddressWithDatums addr = lift . utxosAtAddressWithDatums addr
     utxosAtAddresses = lift . utxosAtAddresses
     utxosAtAddressesWithDatums = lift . utxosAtAddressesWithDatums
     utxoRefsAtAddress = lift . utxoRefsAtAddress
+    utxosAtPaymentCredential = lift . utxosAtPaymentCredential
+    utxosAtPaymentCredentialWithDatums = lift . utxosAtPaymentCredentialWithDatums
     slotConfig = lift slotConfig
-    currentSlot = lift currentSlot
+    slotOfCurrentBlock = lift slotOfCurrentBlock
     logMsg ns s = lift . logMsg ns s
 
 instance GYTxMonad m => GYTxMonad (RandT g m) where
@@ -192,12 +212,15 @@ instance GYTxQueryMonad m => GYTxQueryMonad (ReaderT env m) where
     utxoAtTxOutRef = lift . utxoAtTxOutRef
     utxosAtTxOutRefs = lift . utxosAtTxOutRefs
     utxosAtTxOutRefsWithDatums = lift . utxosAtTxOutRefsWithDatums
-    utxosAtAddress = lift . utxosAtAddress
+    utxosAtAddress addr = lift . utxosAtAddress addr
+    utxosAtAddressWithDatums addr = lift . utxosAtAddressWithDatums addr
     utxosAtAddresses = lift . utxosAtAddresses
     utxosAtAddressesWithDatums = lift . utxosAtAddressesWithDatums
     utxoRefsAtAddress = lift . utxoRefsAtAddress
+    utxosAtPaymentCredential = lift . utxosAtPaymentCredential
+    utxosAtPaymentCredentialWithDatums = lift . utxosAtPaymentCredentialWithDatums
     slotConfig = lift slotConfig
-    currentSlot = lift currentSlot
+    slotOfCurrentBlock = lift slotOfCurrentBlock
     logMsg ns s = lift . logMsg ns s
 
 instance GYTxMonad m => GYTxMonad (ReaderT g m) where
@@ -212,12 +235,15 @@ instance GYTxQueryMonad m => GYTxQueryMonad (ExceptT GYTxMonadException m) where
     utxoAtTxOutRef = lift . utxoAtTxOutRef
     utxosAtTxOutRefs = lift . utxosAtTxOutRefs
     utxosAtTxOutRefsWithDatums = lift . utxosAtTxOutRefsWithDatums
-    utxosAtAddress = lift . utxosAtAddress
+    utxosAtAddress addr = lift . utxosAtAddress addr
+    utxosAtAddressWithDatums addr = lift . utxosAtAddressWithDatums addr
     utxosAtAddresses = lift . utxosAtAddresses
     utxosAtAddressesWithDatums = lift . utxosAtAddressesWithDatums
     utxoRefsAtAddress = lift . utxoRefsAtAddress
+    utxosAtPaymentCredential = lift . utxosAtPaymentCredential
+    utxosAtPaymentCredentialWithDatums = lift . utxosAtPaymentCredentialWithDatums
     slotConfig = lift slotConfig
-    currentSlot = lift currentSlot
+    slotOfCurrentBlock = lift slotOfCurrentBlock
     logMsg ns s = lift . logMsg ns s
 
 instance GYTxMonad m => GYTxMonad (ExceptT GYTxMonadException m) where
@@ -297,8 +323,7 @@ data GYTxSkeleton (v :: PlutusVersion) = GYTxSkeleton
     { gytxIns           :: ![GYTxIn v]
     , gytxOuts          :: ![GYTxOut v]
     , gytxRefIns        :: !(GYTxSkeletonRefIns v)
-    -- TODO: restrict versions of minting policies similarly to validators. #34 (https://github.com/geniusyield/atlas/issues/34)
-    , gytxMint          :: !(Map (Some GYMintingPolicy) (Map GYTokenName Integer, GYRedeemer))
+    , gytxMint          :: !(Map (GYMintScript v) (Map GYTokenName Integer, GYRedeemer))
     , gytxSigs          :: !(Set GYPubKeyHash)
     , gytxInvalidBefore :: !(Maybe GYSlot)
     , gytxInvalidAfter  :: !(Maybe GYSlot)
@@ -440,7 +465,7 @@ valueFromPlutus' val = either
 -- | Convert a 'Plutus.Value' to 'GYValue' in 'IO'.
 --
 -- Throw 'GYConversionException' if conversion fails.
-valueFromPlutusIO :: PlutusValue.Value -> IO GYValue
+valueFromPlutusIO :: Plutus.Value -> IO GYValue
 valueFromPlutusIO val = either
     (throwIO . GYConversionException . flip GYInvalidPlutusValue val)
     pure
@@ -464,10 +489,10 @@ makeAssetClassIO a b = either
     pure
     (makeAssetClass a b)
 
--- | Convert a 'PlutusValue.AssetClass' to 'GYAssetClass' in 'GYTxMonad'.
+-- | Convert a 'Plutus.AssetClass' to 'GYAssetClass' in 'GYTxMonad'.
 --
 -- Throw 'GYConversionException' if conversion fails.
-assetClassFromPlutus' :: MonadError GYTxMonadException m => PlutusValue.AssetClass -> m GYAssetClass
+assetClassFromPlutus' :: MonadError GYTxMonadException m => Plutus.AssetClass -> m GYAssetClass
 assetClassFromPlutus' x = either
     (throwError . GYConversionException . GYInvalidPlutusAsset)
     pure
@@ -476,7 +501,7 @@ assetClassFromPlutus' x = either
 -- | Convert a 'PlutusValue.TokenName' to 'GYTokenName' in 'GYTxMonad'.
 --
 -- Throw 'GYConversionException' if conversion fails.
-tokenNameFromPlutus' :: MonadError GYTxMonadException m => PlutusValue.TokenName -> m GYTokenName
+tokenNameFromPlutus' :: MonadError GYTxMonadException m => Plutus.TokenName -> m GYTokenName
 tokenNameFromPlutus' x = maybe
     (throwError . GYConversionException . GYInvalidPlutusAsset $ GYTokenNameTooBig x)
     pure
@@ -552,10 +577,24 @@ utxoDatumPureHushed (_utxo, Nothing) = Nothing
 utxoDatumPureHushed (GYUTxO {..}, Just d) =
   datumToPlutus' d & Plutus.fromBuiltinData <&> \d' -> (utxoRef, (utxoAddress, utxoValue, d'))
 
+-- | Pure variant of `utxoDatum`.
+utxoDatumPure :: Plutus.FromData a => (GYUTxO, Maybe GYDatum) -> Either GYQueryDatumError (GYAddress, GYValue, a)
+utxoDatumPure (utxo, Nothing) = Left $ GYNoDatumHash utxo
+utxoDatumPure (GYUTxO {..}, Just d) =
+  case Plutus.fromBuiltinData $ datumToPlutus' d of
+    Nothing -> Left $ GYInvalidDatum d
+    Just a  -> Right (utxoAddress, utxoValue, a)
+
 -- | Version of 'utxoDatum' that throws 'GYTxMonadException'.
 utxoDatum' :: (GYTxQueryMonad m, Plutus.FromData a) => GYUTxO -> m (GYAddress, GYValue, a)
 utxoDatum' utxo = do
     x <- utxoDatum utxo
+    liftEither $ first GYQueryDatumException x
+
+-- | Version of 'utxoDatumPure' that throws 'GYTxMonadException'.
+utxoDatumPure' :: (MonadError GYTxMonadException m, Plutus.FromData a) => (GYUTxO, Maybe GYDatum) -> m (GYAddress, GYValue, a)
+utxoDatumPure' utxoWithDatum = do
+    let x = utxoDatumPure utxoWithDatum
     liftEither $ first GYQueryDatumException x
 
 utxoDatumHushed :: (GYTxQueryMonad m, Plutus.FromData a) => GYUTxO -> m (Maybe (GYAddress, GYValue, a))
@@ -573,9 +612,9 @@ mustHaveOutput o = emptyGYTxSkeleton {gytxOuts = [o]}
 mustHaveOptionalOutput :: Maybe (GYTxOut v) -> GYTxSkeleton v
 mustHaveOptionalOutput = maybe mempty $ \o -> emptyGYTxSkeleton {gytxOuts = [o]}
 
-mustMint :: GYMintingPolicy u -> GYRedeemer -> GYTokenName -> Integer -> GYTxSkeleton v
+mustMint :: GYMintScript v -> GYRedeemer -> GYTokenName -> Integer -> GYTxSkeleton v
 mustMint _ _ _ 0  = mempty
-mustMint p r tn n = emptyGYTxSkeleton {gytxMint = Map.singleton (Some p) (Map.singleton tn n, r)}
+mustMint p r tn n = emptyGYTxSkeleton {gytxMint = Map.singleton p (Map.singleton tn n, r)}
 
 mustBeSignedBy :: GYPubKeyHash -> GYTxSkeleton v
 mustBeSignedBy pkh = emptyGYTxSkeleton {gytxSigs = Set.singleton pkh}

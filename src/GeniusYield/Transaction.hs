@@ -60,11 +60,11 @@ module GeniusYield.Transaction (
 ) where
 
 import           Control.Monad.Trans.Except            (runExceptT, throwE)
-import           Data.Foldable                         (for_)
-import           Data.List                             (nub)
+import           Data.Foldable                         (Foldable (foldMap'),
+                                                        for_)
+import           Data.List                             (delete)
 import qualified Data.Map                              as Map
 import           Data.Ratio                            ((%))
-import           GHC.Records                           (getField)
 
 import           Data.Either.Combinators               (maybeToRight)
 import           Data.Maybe                            (fromJust)
@@ -75,6 +75,8 @@ import qualified Cardano.Ledger.Alonzo.Scripts         as AlonzoScripts
 import qualified Cardano.Ledger.Alonzo.Tx              as AlonzoTx
 import           Cardano.Slotting.Time                 (SystemStart)
 
+import           Cardano.Ledger.Core                   (EraTx (sizeTxF))
+import           Control.Lens                          (view)
 import           Control.Monad.Random
 import           GeniusYield.HTTP.Errors               (IsGYApiError)
 import           GeniusYield.Imports
@@ -87,7 +89,7 @@ import           GeniusYield.Types
 data GYBuildTxEnv = GYBuildTxEnv
     { gyBTxEnvSystemStart    :: !SystemStart
     , gyBTxEnvEraHistory     :: !(Api.EraHistory Api.CardanoMode)
-    , gyBTxEnvProtocolParams :: !Api.S.ProtocolParameters
+    , gyBTxEnvProtocolParams :: !(Api.S.BundledProtocolParameters Api.S.BabbageEra)
     , gyBTxEnvPools          :: !(Set Api.S.PoolId)
     , gyBTxEnvOwnUtxos       :: !GYUTxOs
     -- ^ own utxos available for use as additional input
@@ -96,19 +98,12 @@ data GYBuildTxEnv = GYBuildTxEnv
     }
 
 utxoFromTxInDetailed :: GYTxInDetailed v -> GYUTxO
-utxoFromTxInDetailed (GYTxInDetailed (GYTxIn ref witns) addr val ms useInline) = GYUTxO ref addr val (toOutDatum witns) ms
-  where
-    toOutDatum GYTxInWitnessKey = GYOutDatumNone
-    toOutDatum
-        (GYTxInWitnessScript
-            _
-            gyTxInDatumValue
-            _
-        ) = (if useInline then GYOutDatumInline else GYOutDatumHash . hashDatum) gyTxInDatumValue
+utxoFromTxInDetailed (GYTxInDetailed (GYTxIn ref _witns) addr val d ms) = GYUTxO ref addr val d ms
 
 data BuildTxException
     = BuildTxBalancingError !BalancingError
     | BuildTxBodyErrorAutoBalance !Api.TxBodyErrorAutoBalance
+    | BuildTxPPConversionError !Api.ProtocolParametersConversionError
     | BuildTxMissingMaxExUnitsParam
     -- ^ Missing max ex units in protocol params
     | BuildTxExUnitsTooBig  -- ^ Execution units required is higher than the maximum as specified by protocol params.
@@ -124,6 +119,7 @@ data BuildTxException
     | BuildTxNoSuitableCollateral
     -- ^ Couldn't find a UTxO to use as collateral.
     | BuildTxCborSimplificationError !CborSimplificationError
+    | BuildTxCollapseExtraOutError !Api.TxBodyError
   deriving stock    Show
   deriving anyclass (Exception, IsGYApiError)
 
@@ -155,7 +151,7 @@ buildUnsignedTxBody :: forall m v.
         -> [GYTxInDetailed v]
         -> [GYTxOut v]
         -> GYUTxOs  -- ^ reference inputs
-        -> Maybe (GYValue, [(Some GYMintingPolicy, GYRedeemer)])  -- ^ minted values
+        -> Maybe (GYValue, [(GYMintScript v, GYRedeemer)])  -- ^ minted values
         -> Maybe GYSlot
         -> Maybe GYSlot
         -> Set GYPubKeyHash
@@ -219,6 +215,7 @@ buildUnsignedTxBody env cstrat insOld outsOld refIns mmint lb ub signers = build
                     , gybtxSigners       = signers
                     , gybtxRefIns        = refIns
                     }
+                (length outsOld)
 
     retryIfRandomImprove GYRandomImproveMultiAsset n _ = buildTxLoop GYLargestFirstMultiAsset (if n == extraLovelaceStart then extraLovelaceStart else n `div` 2)
     retryIfRandomImprove _ _ err                       = pure $ Left err
@@ -236,11 +233,11 @@ the tx with 'finalizeGYBalancedTx'. If such is the case, 'balanceTxStep' should 
 -}
 balanceTxStep :: (HasCallStack, MonadRandom m)
     => GYBuildTxEnv
-    -> Maybe (GYValue, [(Some GYMintingPolicy, GYRedeemer)]) -- ^ minting
-    -> [GYTxInDetailed v]                                    -- ^ transaction inputs
-    -> [GYTxOut v]                                           -- ^ transaction outputs
-    -> GYCoinSelectionStrategy                               -- ^ Coin selection strategy to use
-    -> Natural                                               -- ^ extra lovelace to look for on top of output value
+    -> Maybe (GYValue, [(GYMintScript v, GYRedeemer)])  -- ^ minting
+    -> [GYTxInDetailed v]                               -- ^ transaction inputs
+    -> [GYTxOut v]                                      -- ^ transaction outputs
+    -> GYCoinSelectionStrategy                          -- ^ Coin selection strategy to use
+    -> Natural                                          -- ^ extra lovelace to look for on top of output value
     -> m (Either BalancingError ([GYTxInDetailed v], GYUTxOs, [GYTxOut v]))
 balanceTxStep
     GYBuildTxEnv
@@ -278,7 +275,7 @@ balanceTxStep
                             . adjustTxOut (minimumUTxO pp)
                     , maxValueSize    = fromMaybe
                                             (error "protocolParamMaxValueSize missing from protocol params")
-                                            $ Api.S.protocolParamMaxValueSize pp
+                                            $ Api.S.protocolParamMaxValueSize $ Api.S.unbundleProtocolParams pp
                     }
                 cstrat
             pure (ins ++ addIns, collaterals, adjustedOuts ++ changeOuts)
@@ -286,11 +283,10 @@ balanceTxStep
     isScriptWitness GYTxInWitnessKey      = False
     isScriptWitness GYTxInWitnessScript{} = True
 
--- Impossible to throw error (with respect to `fromJust`), to avoid it, it would have been nice if `Cardano.Api` also exposed constructors of GADT `TxTotalAndReturnCollateralSupportedInEra era` (though it is done in later version, and thus can modify below line then). Now, even type of this GADT isn't exported, thus can't annotate type below.
--- retColSup :: Api.TxTotalAndReturnCollateralSupportedInEra Api.BabbageEra
-retColSup = fromJust $ Api.totalAndReturnCollateralSupportedInEra Api.BabbageEra
+retColSup :: Api.S.TxTotalAndReturnCollateralSupportedInEra Api.S.BabbageEra
+retColSup = Api.TxTotalAndReturnCollateralInBabbageEra
 
-finalizeGYBalancedTx :: GYBuildTxEnv -> GYBalancedTx v -> Either BuildTxException GYTxBody
+finalizeGYBalancedTx :: GYBuildTxEnv -> GYBalancedTx v -> Int -> Either BuildTxException GYTxBody
 finalizeGYBalancedTx
     GYBuildTxEnv
         { gyBTxEnvSystemStart    = ss
@@ -320,38 +316,13 @@ finalizeGYBalancedTx
         changeAddr
   where
 
-    -- reference scripts
-    -- 1. it seems we need to tell both which refs have reference scripts
     inRefs :: Api.TxInsReference Api.BuildTx Api.BabbageEra
     inRefs = case inRefs' of
         [] -> Api.TxInsReferenceNone
         _  -> Api.TxInsReference Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra inRefs'
 
     inRefs' :: [Api.TxIn]
-    inRefs' = nub $
-        -- reference scripts
-        [ txOutRefToApi ref
-        | GYTxInDetailed { gyTxInDet = GYTxIn { gyTxInWitness = GYTxInWitnessScript (GYInReference ref _) _ _ } } <- ins
-        ] ++
-        -- reference inputs
-        [ txOutRefToApi (utxoRef utxo)
-        | utxo <- utxosToList utxosRefInputs
-        ]
-
-    -- reference script:
-    -- 2. and also provide the utxos with named scripts.
-    --
-    -- Note: we can implement this also by having the caller provide this UTxO
-    -- (they need to provide own UTxO already for balancing)
-    -- But this seems to work for now as well.
-    utxosRefScripts :: GYUTxOs
-    utxosRefScripts = utxosFromList
-        [ GYUTxO ref addr mempty GYOutDatumNone (Just (Some s))
-        | GYTxInDetailed { gyTxInDet = GYTxIn { gyTxInWitness = GYTxInWitnessScript (GYInReference ref s) _ _ } } <- ins
-        ]
-      where
-        -- TODO: any address seems to work!?
-        addr = unsafeAddressFromText "addr_test1qrsuhwqdhz0zjgnf46unas27h93amfghddnff8lpc2n28rgmjv8f77ka0zshfgssqr5cnl64zdnde5f8q2xt923e7ctqu49mg5"
+    inRefs' = [ txOutRefToApi r | r <- utxosRefs utxosRefInputs ]
 
     -- utxos for inputs
     utxosIn :: GYUTxOs
@@ -359,13 +330,13 @@ finalizeGYBalancedTx
 
     -- Map to lookup information for various utxos.
     utxos :: GYUTxOs
-    utxos = utxosIn <> utxosRefScripts <> utxosRefInputs <> collaterals
+    utxos = utxosIn <> utxosRefInputs <> collaterals
 
     outs' :: [Api.S.TxOut Api.S.CtxTx Api.S.BabbageEra]
     outs' = txOutToApi <$> outs
 
     ins' :: [(Api.TxIn, Api.BuildTxWith Api.BuildTx (Api.Witness Api.WitCtxTxIn Api.BabbageEra))]
-    ins' = [ txInToApi (gyTxInDetInlineDat i) (gyTxInDet i) |  i <- ins ]
+    ins' = [ txInToApi (isInlineDatum $ gyTxInDetDatum i) (gyTxInDet i) |  i <- ins ]
 
     collaterals' :: Api.TxInsCollateral Api.BabbageEra
     collaterals' = case utxosRefs collaterals of
@@ -397,12 +368,12 @@ finalizeGYBalancedTx
     mint = case mmint of
         Nothing      -> Api.TxMintNone
         Just (v, xs) -> Api.TxMintValue Api.MultiAssetInBabbageEra (valueToApi v) $ Api.BuildTxWith $ Map.fromList
-            [ ( mintingPolicyApiId p
-            , mintingPolicyToApiPlutusScriptWitness p
-                    (redeemerToApi r)
-                    (Api.ExecutionUnits 0 0)
-            )
-            | (Some p, r) <- xs
+            [ ( mintingPolicyApiIdFromWitness p
+              , gyMintingScriptWitnessToApiPlutusSW p
+                      (redeemerToApi r)
+                      (Api.ExecutionUnits 0 0)
+              )
+            | (p, r) <- xs
             ]
 
     -- Putting `TxTotalCollateralNone` & `TxReturnCollateralNone` would have them appropriately calculated by `makeTransactionBodyAutoBalance` but then return collateral it generates is only for ada. To support multi-asset collateral input we therefore calculate correct values ourselves and put appropriate entries here to have `makeTransactionBodyAutoBalance` calculate appropriate overestimated fees.
@@ -433,7 +404,7 @@ finalizeGYBalancedTx
         Api.TxMetadataNone
         Api.TxAuxScriptsNone
         extra
-        (Api.BuildTxWith $ Just pp)
+        (Api.BuildTxWith $ Just $ Api.S.unbundleProtocolParams pp)
         Api.TxWithdrawalsNone
         Api.TxCertificatesNone
         Api.TxUpdateProposalNone
@@ -447,41 +418,43 @@ If not checked, the returned txbody may fail during submission.
 makeTransactionBodyAutoBalanceWrapper :: GYUTxOs
                                       -> SystemStart
                                       -> Api.S.EraHistory Api.S.CardanoMode
-                                      -> Api.S.ProtocolParameters
+                                      -> Api.S.BundledProtocolParameters Api.S.BabbageEra
                                       -> Set Api.S.PoolId
                                       -> Api.S.UTxO Api.S.BabbageEra
                                       -> Api.S.TxBodyContent Api.S.BuildTx Api.S.BabbageEra
                                       -> GYAddress
+                                      -> Int
                                       -> Either BuildTxException GYTxBody
-makeTransactionBodyAutoBalanceWrapper collaterals ss eh pp ps utxos body changeAddr = do
+makeTransactionBodyAutoBalanceWrapper collaterals ss eh pp ps utxos body changeAddr numSkeletonOuts = do
     Api.ExecutionUnits
         { executionSteps  = maxSteps
         , executionMemory = maxMemory
-        } <- maybeToRight BuildTxMissingMaxExUnitsParam $ Api.S.protocolParamMaxTxExUnits pp
-    let maxTxSize = Api.S.protocolParamMaxTxSize pp
+        } <- maybeToRight BuildTxMissingMaxExUnitsParam $ Api.S.protocolParamMaxTxExUnits $ Api.S.unbundleProtocolParams pp
+    let maxTxSize = Api.S.protocolParamMaxTxSize $ Api.S.unbundleProtocolParams pp
         changeAddrApi :: Api.S.AddressInEra Api.S.BabbageEra = addressToApi' changeAddr
+        stakeDelegDeposits = mempty  -- TODO: Currently it's empty as we don't support for unregistration!
 
     -- First we obtain the calculated fees to correct for our collaterals.
-    bodyBeforeCollUpdate@(Api.BalancedTxBody _ _ (Api.Lovelace feeOld)) <-
+    bodyBeforeCollUpdate@(Api.BalancedTxBody _ _ _ (Api.Lovelace feeOld)) <-
       first BuildTxBodyErrorAutoBalance $ Api.makeTransactionBodyAutoBalance
-        Api.BabbageEraInCardanoMode
         ss
-        eh
-        pp
+        (Api.toLedgerEpochInfo eh)
+        (Api.S.unbundleProtocolParams pp)
         ps
+        stakeDelegDeposits
         utxos
         body
         changeAddrApi
         Nothing
 
     -- We should call `makeTransactionBodyAutoBalance` again with updated values of collaterals so as to get slightly lower fee estimate.
-    Api.BalancedTxBody txBody _ _ <- if collaterals == mempty then return bodyBeforeCollUpdate else
+    Api.BalancedTxBody txBodyContent txBody extraOut _ <- if collaterals == mempty then return bodyBeforeCollUpdate else
 
       let
 
         collateralTotalValue :: GYValue = foldMapUTxOs utxoValue collaterals
         collateralTotalLovelace :: Integer = fst $ valueSplitAda collateralTotalValue
-        balanceNeeded :: Integer = ceiling $ (feeOld * toInteger (fromJust $ Api.S.protocolParamCollateralPercent pp)) % 100
+        balanceNeeded :: Integer = ceiling $ (feeOld * toInteger (fromJust $ Api.S.protocolParamCollateralPercent $ Api.S.unbundleProtocolParams pp)) % 100
 
       in do
 
@@ -495,11 +468,11 @@ makeTransactionBodyAutoBalanceWrapper collaterals ss eh pp ps utxos body changeA
           else Left $ BuildTxCollateralShortFall (fromInteger balanceNeeded) (fromInteger collateralTotalLovelace) -- In this case `makeTransactionBodyAutoBalance` doesn't return an error but instead returns `(Api.TxTotalCollateralNone, Api.TxReturnCollateralNone)`
 
         first BuildTxBodyErrorAutoBalance $ Api.makeTransactionBodyAutoBalance
-          Api.BabbageEraInCardanoMode
           ss
-          eh
-          pp
+          (Api.toLedgerEpochInfo eh)
+          (Api.S.unbundleProtocolParams pp)
           ps
+          stakeDelegDeposits
           utxos
           body {Api.txTotalCollateral = txColl, Api.txReturnCollateral = collRet}
           changeAddrApi
@@ -511,7 +484,7 @@ makeTransactionBodyAutoBalanceWrapper collaterals ss eh pp ps utxos body changeA
             { AlonzoScripts.exUnitsSteps = steps
             , AlonzoScripts.exUnitsMem   = mem
             } = AlonzoTx.totExUnits ltx
-        txSize :: Natural = fromInteger $ getField @"txsize" ltx
+        txSize :: Natural = fromInteger $ view sizeTxF ltx
     -- See: Cardano.Ledger.Alonzo.Rules.validateExUnitsTooBigUTxO
     unless (steps <= maxSteps && mem <= maxMemory) $
         Left $ BuildTxExUnitsTooBig (maxSteps, maxMemory) (steps, mem)
@@ -520,4 +493,46 @@ makeTransactionBodyAutoBalanceWrapper collaterals ss eh pp ps utxos body changeA
         {- Technically, this doesn't compare with the _final_ tx size, because of signers that will be
         added later. But signing witnesses are only a few bytes, so it's unlikely to be an issue -}
         Left (BuildTxSizeTooBig maxTxSize txSize)
-    first BuildTxCborSimplificationError $ simplifyGYTxBodyCbor $ txBodyFromApi txBody
+
+    collapsedBody <- first BuildTxCollapseExtraOutError $ collapseExtraOut extraOut txBodyContent txBody numSkeletonOuts
+
+    first BuildTxCborSimplificationError $ simplifyGYTxBodyCbor $ txBodyFromApi collapsedBody
+
+
+{- | Collapses the extra out generated in the last step of tx building into
+    another change output (If one exists)
+
+    The amount of outputs that should not be modified is needed. In other words,
+    the amount of outputs described in the GYSkeleton. It is assumed that these
+    outputs are at the start of the txOuts list.
+-}
+collapseExtraOut
+  :: Api.TxOut Api.S.CtxTx Api.S.BabbageEra
+  -- ^ The extra output generated by @makeTransactionBodyAutoBalance@.
+  -> Api.TxBodyContent Api.S.BuildTx Api.S.BabbageEra
+  -- ^ The body content generted by @makeTransactionBodyAutoBalance@.
+  -> Api.TxBody Api.S.BabbageEra
+  -- ^ The body generted by @makeTransactionBodyAutoBalance@.
+  -> Int
+  -- ^ The number of skeleton outputs we don't want to touch.
+  -> Either Api.S.TxBodyError (Api.TxBody Api.S.BabbageEra)
+  -- ^ The updated body with the collapsed outputs
+collapseExtraOut apiOut@(Api.TxOut _ outVal _ _) bodyContent@Api.TxBodyContent {txOuts} txBody numSkeletonOuts
+ | Api.txOutValueToLovelace outVal == 0 = pure txBody
+ | otherwise =
+    case delete apiOut changeOuts of
+        [] -> pure txBody
+        ((Api.TxOut sOutAddr sOutVal sOutDat sOutRefScript) : remOuts) ->
+          let
+
+            nOutVal = Api.TxOutValue Api.MultiAssetInBabbageEra $ foldMap' Api.txOutValueToValue [sOutVal, outVal]
+
+            -- nOut == new Out == The merging of both apiOut and sOut
+            nOut = Api.TxOut sOutAddr nOutVal sOutDat sOutRefScript
+            -- nOuts == new Outs == The new list of outputs
+            nOuts = skeletonOuts ++ remOuts ++ [nOut]
+
+          in
+            Api.S.createAndValidateTransactionBody $ bodyContent { Api.txOuts = nOuts }
+  where
+    (skeletonOuts, changeOuts) = splitAt numSkeletonOuts txOuts

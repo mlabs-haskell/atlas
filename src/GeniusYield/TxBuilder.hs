@@ -25,20 +25,20 @@ import           GeniusYield.TxBuilder.Errors    as X
 import           GeniusYield.TxBuilder.Node      as X
 import           GeniusYield.TxBuilder.NodeQuery as X
 import           GeniusYield.TxBuilder.Random    as X
-import           GeniusYield.TxBuilder.Run       as X
+import           GeniusYield.TxBuilder.Clb       as X
 
 import           GeniusYield.Imports
 import           GeniusYield.Types
 
 -- | Query the balance at given address.
 queryBalance :: GYTxQueryMonad m => GYAddress -> m GYValue
-queryBalance addr = foldMapUTxOs utxoValue <$> utxosAtAddress addr
+queryBalance addr = foldMapUTxOs utxoValue <$> utxosAtAddress addr Nothing
 
 -- | Query the txoutrefs at given address with ADA-only values.
 --
 -- Useful for finding a txoutref to be used as collateral.
 getAdaOnlyUTxO :: GYTxQueryMonad m => GYAddress -> m [(GYTxOutRef, Natural)]
-getAdaOnlyUTxO addr = adaOnlyUTxOPure <$> utxosAtAddress addr
+getAdaOnlyUTxO addr = adaOnlyUTxOPure <$> utxosAtAddress addr Nothing
 
 -- | Get a UTxO suitable for use as collateral.
 --

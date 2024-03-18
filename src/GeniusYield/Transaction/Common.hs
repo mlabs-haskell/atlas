@@ -31,7 +31,7 @@ data GYBalancedTx v = GYBalancedTx
     { gybtxIns           :: ![GYTxInDetailed v]
     , gybtxCollaterals   :: !GYUTxOs
     , gybtxOuts          :: ![GYTxOut v]
-    , gybtxMint          :: !(Maybe (GYValue, [(Some GYMintingPolicy, GYRedeemer)]))
+    , gybtxMint          :: !(Maybe (GYValue, [(GYMintScript v, GYRedeemer)]))
     , gybtxInvalidBefore :: !(Maybe GYSlot)
     , gybtxInvalidAfter  :: !(Maybe GYSlot)
     , gybtxSigners       :: !(Set GYPubKeyHash)
@@ -43,12 +43,8 @@ data GYTxInDetailed v = GYTxInDetailed
     { gyTxInDet          :: !(GYTxIn v)
     , gyTxInDetAddress   :: !GYAddress
     , gyTxInDetValue     :: !GYValue
-    {- When a GYUTxO is converted to a GYTxInDetailed (and back again later), this field preserves the ref script
-    attached to the UTxO (potentially so other inputs can refer to the script). -}
+    , gyTxInDetDatum     :: !GYOutDatum
     , gyTxInDetScriptRef :: !(Maybe (Some GYScript))
-
-    -- | Did GYUtXo had inline datum?
-    , gyTxInDetInlineDat :: !Bool
     }
   deriving (Eq, Show)
 
@@ -73,13 +69,8 @@ instance Eq BalancingError where
 -- Transaction Utilities
 -------------------------------------------------------------------------------
 
-minimumUTxO :: Api.S.ProtocolParameters -> GYTxOut v -> Natural
-minimumUTxO pp txOut = do
-    case Api.calculateMinimumUTxO Api.ShelleyBasedEraBabbage (txOutToApi txOut) pp of
-        -- This function can only ever fail if the protocol params doesn't contain the min ada value.
-        Left err -> error
-            $ "minimumUTxO: Protocol Params missing minimum UTxO value; Original error: " ++ show err
-        Right v  -> extractLovelace v
+minimumUTxO :: Api.S.BundledProtocolParameters Api.S.BabbageEra -> GYTxOut v -> Natural
+minimumUTxO pp txOut = fromInteger $ coerce $ Api.calculateMinimumUTxO Api.ShelleyBasedEraBabbage (txOutToApi txOut) pp
 
 adjustTxOut :: (GYTxOut v -> Natural) -> GYTxOut v -> GYTxOut v
 adjustTxOut minimumUTxOF = helper

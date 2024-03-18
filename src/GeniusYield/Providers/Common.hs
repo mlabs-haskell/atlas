@@ -7,23 +7,26 @@ Stability   : develop
 
 -}
 module GeniusYield.Providers.Common (
-    SomeDeserializeError (..)
+      SomeDeserializeError (..)
+    , SubmitTxException (..)
+    , datumFromCBOR
     , newServantClientEnv
     , fromJson
     , parseEraHist
-    , babbageProtocolVersion
     , preprodEraHist
     , previewEraHist
     , mainnetEraHist
     , silenceHeadersClientError
+    , extractAssetClass
 ) where
 
 import qualified Data.Aeson                           as Aeson
+import qualified Data.ByteString.Base16               as BS16
 import qualified Data.ByteString.Lazy                 as LBS
 import           Data.Maybe                           (fromJust)
 import           Data.Text                            (Text)
 import qualified Data.Text                            as Text
-import           Numeric.Natural                      (Natural)
+import qualified Data.Text.Encoding                   as Text
 
 import qualified Network.HTTP.Client                  as HttpClient
 import qualified Network.HTTP.Client.TLS              as HttpClientTLS
@@ -32,13 +35,18 @@ import qualified Servant.Client                       as Servant
 import qualified Servant.Client.Core                  as Servant
 
 import qualified Cardano.Api                          as Api
+import qualified Cardano.Api.Shelley                  as Api
 import           Cardano.Slotting.Time                (RelativeTime (RelativeTime),
                                                        mkSlotLength)
+import           Control.Exception                    (Exception)
 import           Data.Bifunctor                       (first)
-import           GeniusYield.Types.Datum              (scriptDataToData)
+import           Data.SOP.Counting                    (NonEmpty (NonEmptyCons, NonEmptyOne))
+import           GeniusYield.Types.Datum              (GYDatum, datumFromApi')
+import           GeniusYield.Types.Script             (mintingPolicyIdToText)
+import           GeniusYield.Types.Value              (GYAssetClass (..),
+                                                       tokenNameToHex)
 import qualified Ouroboros.Consensus.Cardano.Block    as Ouroboros
 import qualified Ouroboros.Consensus.HardFork.History as Ouroboros
-import           Ouroboros.Consensus.Util.Counting    (NonEmpty (NonEmptyCons, NonEmptyOne))
 
 data SomeDeserializeError
     = DeserializeErrorBech32 !Api.Bech32DecodeError
@@ -51,6 +59,22 @@ data SomeDeserializeError
     | DeserializeErrorAddress
     | DeserializeErrorImpossibleBranch !Text
     deriving stock (Eq, Show)
+
+newtype SubmitTxException = SubmitTxException Text
+  deriving stock    (Show)
+  deriving anyclass (Exception)
+
+-- | Get datum from bytes.
+datumFromCBOR :: Text -> Either SomeDeserializeError GYDatum
+datumFromCBOR d = do
+  bs  <- fromEither $ BS16.decode $ Text.encodeUtf8 d
+  api <- fromEither $ Api.deserialiseFromCBOR Api.AsHashableScriptData bs
+  return $ datumFromApi' api
+  where
+    e = DeserializeErrorHex d
+
+    fromEither :: Either e a -> Either SomeDeserializeError a
+    fromEither = first $ const e
 
 {- | Remove request headers info from returned ClientError.
 
@@ -73,7 +97,7 @@ fromJson :: FromData a => LBS.ByteString -> Either SomeDeserializeError a
 fromJson b = do
     v <- first (DeserializeErrorAeson . Text.pack) $ Aeson.eitherDecode b
     x <- first DeserializeErrorScriptDataJson $ Api.scriptDataFromJson Api.ScriptDataJsonDetailedSchema v
-    pure . fromJust . fromData $ scriptDataToData x
+    pure . fromJust . fromData $ Api.toPlutusData $ Api.getScriptData x
 
 {- | Convert a regular list of era summaries (a la Ogmios) into a typed EraHistory (a la Ouroboros).
 
@@ -99,14 +123,11 @@ parseEraHist mkEra [byronEra, shelleyEra, allegraEra, maryEra, alonzoEra, babbag
     $ NonEmptyOne (mkEra babbageEra)
 parseEraHist _ _ = Nothing
 
--- | Hardcoded babbage protocol Version
-babbageProtocolVersion :: Natural
-babbageProtocolVersion = 7
-
 {- | Hardcoded era history for preprod.
-FIXME: Remove this hack as it shouldn't be hardcoded.
 
-See: "GeniusYield.CardanoApi.EraHistory.showEraHistory"
+__NOTE:__ This is only to be used for testing.
+
+Also see: "GeniusYield.CardanoApi.EraHistory.showEraHistory"
 -}
 preprodEraHist :: Ouroboros.Interpreter (Ouroboros.CardanoEras Ouroboros.StandardCrypto)
 preprodEraHist = Ouroboros.mkInterpreter . Ouroboros.Summary
@@ -245,3 +266,9 @@ mainnetEraHist = Ouroboros.mkInterpreter . Ouroboros.Summary
             , eraEnd = Ouroboros.EraUnbounded
             , eraParams = Ouroboros.EraParams {eraEpochSize = 432000, eraSlotLength = mkSlotLength 1, eraSafeZone = Ouroboros.StandardSafeZone 129600}
             }
+
+-- | Extract currency symbol & token name part of an `GYAssetClass` when it is of such a form. When input is @Just GYLovelace@ or @Nothing@, this function returns @Nothing@.
+extractAssetClass :: Maybe GYAssetClass -> Maybe (Text, Text)
+extractAssetClass Nothing = Nothing
+extractAssetClass (Just GYLovelace) = Nothing
+extractAssetClass (Just (GYToken pid tn)) = Just (mintingPolicyIdToText pid, tokenNameToHex tn)

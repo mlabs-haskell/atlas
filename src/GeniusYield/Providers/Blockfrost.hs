@@ -6,9 +6,9 @@ module GeniusYield.Providers.Blockfrost
     , blockfrostEraHistory
     , blockfrostQueryUtxo
     , blockfrostLookupDatum
-    , blockfrostSlotActions
-    , blockfrostGetCurrentSlot
+    , blockfrostGetSlotOfCurrentBlock
     , blockfrostSubmitTx
+    , blockfrostAwaitTxConfirmed
     , networkIdToProject
     ) where
 
@@ -17,6 +17,7 @@ import qualified Cardano.Api                          as Api
 import qualified Cardano.Api.Shelley                  as Api.S
 import qualified Cardano.Slotting.Slot                as CSlot
 import qualified Cardano.Slotting.Time                as CTime
+import           Control.Concurrent                   (threadDelay)
 import           Control.Monad                        ((<=<))
 import           Control.Monad.Except                 (throwError)
 import qualified Data.Aeson                           as Aeson
@@ -36,8 +37,8 @@ import qualified Web.HttpApiData                      as Web
 
 import           GeniusYield.Imports
 import           GeniusYield.Providers.Common
-import           GeniusYield.Providers.SubmitApi      (SubmitTxException (..))
 import           GeniusYield.Types
+import           GeniusYield.Utils                    (serialiseToBech32WithPrefix)
 
 data BlockfrostProviderException
     = BlpvApiError !Text !Blockfrost.BlockfrostError
@@ -48,8 +49,12 @@ data BlockfrostProviderException
     deriving stock (Eq, Show)
     deriving anyclass (Exception)
 
+throwBlpvApiError :: Text -> Blockfrost.BlockfrostError -> IO a
+throwBlpvApiError locationInfo =
+    throwIO . BlpvApiError locationInfo . silenceHeadersBlockfrostClientError
+
 handleBlockfrostError :: Text -> Either Blockfrost.BlockfrostError a -> IO a
-handleBlockfrostError locationInfo = either (throwIO . BlpvApiError locationInfo . silenceHeadersBlockfrostClientError) pure
+handleBlockfrostError locationInfo = either (throwBlpvApiError locationInfo) pure
 
 silenceHeadersBlockfrostClientError :: Blockfrost.BlockfrostError -> Blockfrost.BlockfrostError
 silenceHeadersBlockfrostClientError (Blockfrost.ServantClientError e) = Blockfrost.ServantClientError $ silenceHeadersClientError e
@@ -60,6 +65,11 @@ lovelacesToInteger = fromIntegral
 
 gyAddressToBlockfrost :: GYAddress -> Blockfrost.Address
 gyAddressToBlockfrost = Blockfrost.mkAddress . addressToText
+
+gyPaymentCredentialToBlockfrost :: GYPaymentCredential -> Blockfrost.Address
+gyPaymentCredentialToBlockfrost cred = Blockfrost.mkAddress $ case cred of
+   GYPaymentCredentialByKey _ -> paymentCredentialToBech32 cred
+   GYPaymentCredentialByScript sh -> serialiseToBech32WithPrefix "addr_vkh" $ validatorHashToApi sh  -- A bug in BF.
 
 -- | Creates a 'GYValue' from a 'Blockfrost.Amount', may fail parsing blockfrost returned asset class.
 amountToValue :: Blockfrost.Amount -> Either Text GYValue
@@ -94,20 +104,62 @@ blockfrostSubmitTx proj tx = do
     handleBlockfrostSubmitError = either (throwIO . SubmitTxException . Text.pack . show . silenceHeadersBlockfrostClientError) pure
 
 -------------------------------------------------------------------------------
+-- Await tx confirmation
+-------------------------------------------------------------------------------
+
+-- | Awaits for the confirmation of a given 'GYTxId'
+blockfrostAwaitTxConfirmed :: Blockfrost.Project -> GYAwaitTx
+blockfrostAwaitTxConfirmed proj p@GYAwaitTxParameters{..} txId = blpAwaitTx 0
+  where
+    blpAwaitTx :: Int -> IO ()
+    blpAwaitTx attempt | maxAttempts <= attempt = throwIO $ GYAwaitTxException p
+    blpAwaitTx attempt = do
+        eTxInfo <- blockfrostQueryTx proj txId
+        case eTxInfo of
+            Left Blockfrost.BlockfrostNotFound -> threadDelay checkInterval >>
+                                                  blpAwaitTx (attempt + 1)
+            Left err -> throwBlpvApiError "AwaitTx" err
+            Right txInfo -> blpAwaitBlock attempt $
+                            Blockfrost._transactionBlock txInfo
+
+    blpAwaitBlock :: Int -> Blockfrost.BlockHash -> IO ()
+    blpAwaitBlock attempt _ | maxAttempts <= attempt = throwIO $ GYAwaitTxException p
+    blpAwaitBlock attempt blockHash = do
+        eBlockInfo <- blockfrostQueryBlock proj blockHash
+        case eBlockInfo of
+            Left Blockfrost.BlockfrostNotFound -> threadDelay checkInterval >>
+                                                  blpAwaitBlock (attempt + 1) blockHash
+            Left err -> throwBlpvApiError "AwaitBlock" err
+
+            Right blockInfo | attempt + 1 == maxAttempts ->
+                when (Blockfrost._blockConfirmations blockInfo < toInteger confirmations) $
+                throwIO $ GYAwaitTxException p
+
+            Right blockInfo ->
+                when (Blockfrost._blockConfirmations blockInfo < toInteger confirmations) $
+                threadDelay checkInterval >> blpAwaitBlock (attempt + 1) blockHash
+
+blockfrostQueryBlock
+    :: Blockfrost.Project
+    -> Blockfrost.BlockHash
+    -> IO (Either Blockfrost.BlockfrostError Blockfrost.Block)
+blockfrostQueryBlock proj = Blockfrost.runBlockfrost proj
+                            . Blockfrost.getBlock . Right
+
+blockfrostQueryTx
+    :: Blockfrost.Project
+    -> GYTxId
+    -> IO (Either Blockfrost.BlockfrostError Blockfrost.Transaction)
+blockfrostQueryTx proj = Blockfrost.runBlockfrost proj
+                         . Blockfrost.getTx . Blockfrost.TxHash
+                         . Api.serialiseToRawBytesHexText . txIdToApi
+
+-------------------------------------------------------------------------------
 -- Slot actions
 -------------------------------------------------------------------------------
 
-blockfrostSlotActions :: Blockfrost.Project -> GYSlotActions
-blockfrostSlotActions proj = GYSlotActions
-    { gyGetCurrentSlot'   = getCurrentSlot
-    , gyWaitForNextBlock' = gyWaitForNextBlockDefault getCurrentSlot
-    , gyWaitUntilSlot'    = gyWaitUntilSlotDefault getCurrentSlot
-    }
-  where
-    getCurrentSlot = blockfrostGetCurrentSlot proj
-
-blockfrostGetCurrentSlot :: Blockfrost.Project -> IO GYSlot
-blockfrostGetCurrentSlot proj = do
+blockfrostGetSlotOfCurrentBlock :: Blockfrost.Project -> IO GYSlot
+blockfrostGetSlotOfCurrentBlock proj = do
     Blockfrost.Block {_blockSlot=slotMaybe, _blockHash=hash} <-
         Blockfrost.runBlockfrost proj Blockfrost.getLatestBlock >>= handleBlockfrostError "Slot"
     case slotMaybe of
@@ -120,40 +172,66 @@ blockfrostGetCurrentSlot proj = do
 
 blockfrostQueryUtxo :: Blockfrost.Project -> GYQueryUTxO
 blockfrostQueryUtxo proj = GYQueryUTxO
-    { gyQueryUtxosAtTxOutRefs'           = blockfrostUtxosAtTxOutRefs proj
-    , gyQueryUtxosAtTxOutRefsWithDatums' = Nothing  -- Will use the default implementation.
-    , gyQueryUtxoAtTxOutRef'             = blockfrostUtxosAtTxOutRef proj
-    , gyQueryUtxoRefsAtAddress'          = gyQueryUtxoRefsAtAddressDefault $ blockfrostUtxosAtAddress proj
-    , gyQueryUtxosAtAddresses'           = gyQueryUtxoAtAddressesDefault $ blockfrostUtxosAtAddress proj
-    , gyQueryUtxosAtAddressesWithDatums' = Nothing  -- Will use the default implementation.
+    { gyQueryUtxosAtTxOutRefs'             = blockfrostUtxosAtTxOutRefs proj
+    , gyQueryUtxosAtTxOutRefsWithDatums'   = Nothing  -- Will use the default implementation.
+    , gyQueryUtxoAtTxOutRef'               = blockfrostUtxosAtTxOutRef proj
+    , gyQueryUtxoRefsAtAddress'            = gyQueryUtxoRefsAtAddressDefault $ blockfrostUtxosAtAddress proj
+    , gyQueryUtxosAtAddresses'             = gyQueryUtxoAtAddressesDefault $ blockfrostUtxosAtAddress proj
+    , gyQueryUtxosAtAddress'               = blockfrostUtxosAtAddress proj
+    , gyQueryUtxosAtAddressWithDatums'     = Nothing
+    , gyQueryUtxosAtAddressesWithDatums'   = Nothing  -- Will use the default implementation.
+    , gyQueryUtxosAtPaymentCredential'     = blockfrostUtxosAtPaymentCredential proj
+    , gyQueryUtxosAtPaymentCredWithDatums' = Nothing  -- Will use the default implementation.
     }
 
-blockfrostUtxosAtAddress :: Blockfrost.Project -> GYAddress -> IO GYUTxOs
-blockfrostUtxosAtAddress proj addr = do
+transformUtxo :: (Blockfrost.AddressUtxo, Maybe (Some GYScript)) -> Either SomeDeserializeError GYUTxO
+transformUtxo (Blockfrost.AddressUtxo {..}, ms) = do
+    val  <- bimap DeserializeErrorAssetClass fold $ traverse amountToValue _addressUtxoAmount
+    addr <- maybeToRight DeserializeErrorAddress $ addressFromTextMaybe $ Blockfrost.unAddress _addressUtxoAddress
+    ref  <- first DeserializeErrorHex . Web.parseUrlPiece
+                $ Blockfrost.unTxHash _addressUtxoTxHash <> Text.pack ('#' : show _addressUtxoOutputIndex)
+    d    <- outDatumFromBlockfrost _addressUtxoDataHash _addressUtxoInlineDatum
+    pure GYUTxO
+        { utxoRef       = ref
+        , utxoAddress   = addr
+        , utxoValue     = val
+        , utxoOutDatum  = d
+        , utxoRefScript = ms
+        }
+
+blockfrostUtxosAtAddress :: Blockfrost.Project -> GYAddress -> Maybe GYAssetClass -> IO GYUTxOs
+blockfrostUtxosAtAddress proj addr mAssetClass = do
+    let extractedAssetClass = extractAssetClass mAssetClass
     {- 'Blockfrost.getAddressUtxos' doesn't return all utxos at that address, only the first 100 or so.
     Have to handle paging manually for all. -}
     addrUtxos  <- handler <=< Blockfrost.runBlockfrost proj
         . Blockfrost.allPages $ \paged ->
-            Blockfrost.getAddressUtxos' (gyAddressToBlockfrost addr) paged Blockfrost.Ascending
+            case extractedAssetClass of
+                Nothing -> Blockfrost.getAddressUtxos' (gyAddressToBlockfrost addr) paged Blockfrost.Ascending
+                Just (ac, tn) -> Blockfrost.getAddressUtxosAsset' (gyAddressToBlockfrost addr) (Blockfrost.mkAssetId $ ac <> tn) paged Blockfrost.Ascending
     addrUtxos' <- mapM (\x -> lookupScriptHashIO proj (Blockfrost._addressUtxoReferenceScriptHash x) >>= \mrs -> return (x, mrs)) addrUtxos
     case traverse transformUtxo addrUtxos' of
       Left err -> throwIO $ BlpvDeserializeFailure locationIdent err
       Right x  -> pure $ utxosFromList x
   where
-    transformUtxo :: (Blockfrost.AddressUtxo, Maybe (Some GYScript)) -> Either SomeDeserializeError GYUTxO
-    transformUtxo (Blockfrost.AddressUtxo {..}, ms) = do
-        val  <- bimap DeserializeErrorAssetClass fold $ traverse amountToValue _addressUtxoAmount
-        ref  <- first DeserializeErrorHex . Web.parseUrlPiece
-                    $ Blockfrost.unTxHash _addressUtxoTxHash <> Text.pack ('#' : show _addressUtxoOutputIndex)
-        d    <- outDatumFromBlockfrost _addressUtxoDataHash _addressUtxoInlineDatum
-        pure GYUTxO
-            { utxoRef       = ref
-            , utxoAddress   = addr
-            , utxoValue     = val
-            , utxoOutDatum  = d
-            , utxoRefScript = ms
-            }
     locationIdent = "AddressUtxos"
+    -- This particular error is fine in this case, we can just return empty list.
+    handler (Left Blockfrost.BlockfrostNotFound) = pure []
+    handler other                                = handleBlockfrostError locationIdent other
+
+blockfrostUtxosAtPaymentCredential :: Blockfrost.Project -> GYPaymentCredential -> IO GYUTxOs
+blockfrostUtxosAtPaymentCredential proj cred = do
+    {- 'Blockfrost.getAddressUtxos' doesn't return all utxos at that address, only the first 100 or so.
+    Have to handle paging manually for all. -}
+    credUtxos  <- handler <=< Blockfrost.runBlockfrost proj
+        . Blockfrost.allPages $ \paged ->
+            Blockfrost.getAddressUtxos' (gyPaymentCredentialToBlockfrost cred) paged Blockfrost.Ascending
+    credUtxos' <- mapM (\x -> lookupScriptHashIO proj (Blockfrost._addressUtxoReferenceScriptHash x) >>= \mrs -> return (x, mrs)) credUtxos
+    case traverse transformUtxo credUtxos' of
+      Left err -> throwIO $ BlpvDeserializeFailure locationIdent err
+      Right x  -> pure $ utxosFromList x
+  where
+    locationIdent = "PaymentCredentialUtxos"
     -- This particular error is fine in this case, we can just return empty list.
     handler (Left Blockfrost.BlockfrostNotFound) = pure []
     handler other                                = handleBlockfrostError locationIdent other
@@ -295,8 +373,8 @@ blockfrostProtocolParams proj = do
   where
     toApiCostModel = Map.fromList
         . Map.foldlWithKey (\acc k x -> case k of
-            Blockfrost.PlutusV1 -> (Api.S.AnyPlutusScriptVersion Api.PlutusScriptV1, Api.CostModel x) : acc
-            Blockfrost.PlutusV2 -> (Api.S.AnyPlutusScriptVersion Api.PlutusScriptV2, Api.CostModel x) : acc
+            Blockfrost.PlutusV1 -> (Api.S.AnyPlutusScriptVersion Api.PlutusScriptV1, Api.CostModel $ Map.elems x) : acc
+            Blockfrost.PlutusV2 -> (Api.S.AnyPlutusScriptVersion Api.PlutusScriptV2, Api.CostModel $ Map.elems x) : acc
             -- Don't care about non plutus cost models.
             Blockfrost.Timelock -> acc
         )
@@ -391,7 +469,7 @@ datumHashFromBlockfrost = first (DeserializeErrorHex . Text.pack) . datumHashFro
 datumFromBlockfrostCBOR :: Blockfrost.ScriptDatumCBOR -> Either SomeDeserializeError GYDatum
 datumFromBlockfrostCBOR d = do
     bs  <- fromEither $ BS16.decode $ Text.encodeUtf8 t
-    api <- fromEither $ Api.deserialiseFromCBOR Api.AsScriptData bs
+    api <- fromEither $ Api.deserialiseFromCBOR Api.AsHashableScriptData bs
     return $ datumFromApi' api
   where
     t = Blockfrost._scriptDatumCborCbor d
@@ -420,8 +498,8 @@ lookupScriptHash h = do
                 Nothing   -> return Nothing
                 Just cbor -> return $
                     if t == Blockfrost.PlutusV1
-                        then Some <$> scriptFromCBOR @PlutusV1 cbor
-                        else Some <$> scriptFromCBOR @PlutusV2 cbor
+                        then Some <$> scriptFromCBOR @'PlutusV1 cbor
+                        else Some <$> scriptFromCBOR @'PlutusV2 cbor
 
 lookupScriptHashIO :: Blockfrost.Project -> Maybe Blockfrost.ScriptHash -> IO (Maybe (Some GYScript))
 lookupScriptHashIO _ Nothing  = return Nothing

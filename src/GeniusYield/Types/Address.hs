@@ -14,6 +14,7 @@ module GeniusYield.Types.Address (
     addressFromApi',
     addressToPlutus,
     addressFromPlutus,
+    addressToPaymentCredential,
     addressFromPubKeyHash,
     addressFromValidator,
     addressFromValidatorHash,
@@ -55,20 +56,24 @@ import qualified Database.PostgreSQL.Simple           as PQ
 import qualified Database.PostgreSQL.Simple.FromField as PQ (FromField (..),
                                                              returnError)
 import qualified Database.PostgreSQL.Simple.ToField   as PQ
-import qualified Plutus.V1.Ledger.Address             as Plutus
-import qualified Plutus.V1.Ledger.Api                 as Plutus
+import qualified PlutusLedgerApi.V1.Address           as Plutus
+import qualified PlutusLedgerApi.V1.Credential        as Plutus
+import qualified PlutusLedgerApi.V1.Crypto            as Plutus
+import qualified PlutusLedgerApi.V1.Scripts           as Plutus
 import qualified PlutusTx.Builtins.Internal           as Plutus
 import qualified PlutusTx.Prelude                     as PlutusTx
 import qualified Text.Printf                          as Printf
 import qualified Web.HttpApiData                      as Web
 
 import           GeniusYield.Imports
+import           GeniusYield.Types.Credential         (GYPaymentCredential,
+                                                       paymentCredentialFromApi)
 import           GeniusYield.Types.Ledger
 import           GeniusYield.Types.NetworkId
 import           GeniusYield.Types.PubKeyHash
 import           GeniusYield.Types.Script
-import           Plutus.V1.Ledger.Address             (stakingCredential)
-import           Plutus.V2.Ledger.Api                 (Credential (..),
+import           PlutusLedgerApi.V1.Address           (stakingCredential)
+import           PlutusLedgerApi.V1.Credential        (Credential (..),
                                                        StakingCredential (..))
 
 -- $setup
@@ -82,6 +87,9 @@ import           Plutus.V2.Ledger.Api                 (Credential (..),
 -- >>> import qualified Web.HttpApiData            as Web
 --
 -- >>> let addr = unsafeAddressFromText "addr_test1qrsuhwqdhz0zjgnf46unas27h93amfghddnff8lpc2n28rgmjv8f77ka0zshfgssqr5cnl64zdnde5f8q2xt923e7ctqu49mg5"
+-- >>> let addrScript = unsafeAddressFromText "addr_test1wqtcz4vq80zxr3dskdcuw7wtfq0vwssd7rrpnnvcvrjhp5sx7leew"
+-- >>> let addrByron1 = unsafeAddressFromText "Ae2tdPwUPEYwFx4dmJheyNPPYXtvHbJLeCaA96o6Y2iiUL18cAt7AizN2zG"
+-- >>> let addrByron2 = unsafeAddressFromText "DdzFFzCqrhsn2RLCG6ogRgDxUUpkM3yNqyaSB3jq9YuuX1zARCJerbCoghG4PGiqwR1h8o4Jk7Mjgu3qhNixep5QAA8QgG9Dp2oE4eit"
 
 -- | Addresses on the blockchain.
 newtype GYAddress = GYAddress Api.AddressAny
@@ -106,6 +114,10 @@ instance Hashable GYAddress where
 --
 -- >>> addressToApi addr
 -- AddressShelley (ShelleyAddress Testnet (KeyHashObj (KeyHash "e1cbb80db89e292269aeb93ec15eb963dda5176b66949fe1c2a6a38d")) (StakeRefBase (KeyHashObj (KeyHash "1b930e9f7add78a174a21000e989ff551366dcd127028cb2aa39f616"))))
+-- >>> addressToApi addrByron1
+-- AddressByron (ByronAddress (Address {addrRoot = 04865e42d2373addbebd5d2acf81c760c848970142889f7ee763091b, addrAttributes = Attributes { data_ = AddrAttributes {aaVKDerivationPath = Nothing, aaNetworkMagic = NetworkMainOrStage} }, addrType = ATVerKey}))
+-- >>> addressToApi addrByron2
+-- AddressByron (ByronAddress (Address {addrRoot = 3f04ff82d3008d3a4f3d2be7d66141dcbcbda74d6a805e463895b72a, addrAttributes = Attributes { data_ = AddrAttributes {aaVKDerivationPath = Just (HDAddressPayload {getHDAddressPayload = "\251C\"a\SUB\209\210M\245S\200S\144\160\190\237y[s\176\148\n3!\DLE\147\141\168"}), aaNetworkMagic = NetworkMainOrStage} }, addrType = ATVerKey}))
 --
 addressToApi :: GYAddress -> Api.AddressAny
 addressToApi = coerce
@@ -158,7 +170,7 @@ shelleyAddressToPlutus (Api.S.ShelleyAddress _network credential stake) =
 
 shelleyCredentialToPlutus :: Api.S.PaymentCredential -> Plutus.Credential
 shelleyCredentialToPlutus (Api.S.PaymentCredentialByKey x)    = Plutus.PubKeyCredential $ Plutus.PubKeyHash    $ PlutusTx.toBuiltin $ Api.serialiseToRawBytes x
-shelleyCredentialToPlutus (Api.S.PaymentCredentialByScript x) = Plutus.ScriptCredential $ Plutus.ValidatorHash $ PlutusTx.toBuiltin $ Api.serialiseToRawBytes x
+shelleyCredentialToPlutus (Api.S.PaymentCredentialByScript x) = Plutus.ScriptCredential . Plutus.ScriptHash . PlutusTx.toBuiltin . Api.serialiseToRawBytes $ x
 
 shelleyStakeRefToPlutus :: Api.S.StakeAddressReference -> Maybe Plutus.StakingCredential
 shelleyStakeRefToPlutus Api.S.NoStakeAddress                      = Nothing
@@ -167,7 +179,7 @@ shelleyStakeRefToPlutus (Api.StakeAddressByValue stakeCredential) = Just $ Plutu
 
 fromCardanoStakeCredential :: Api.StakeCredential -> Plutus.Credential
 fromCardanoStakeCredential (Api.S.StakeCredentialByKey x)    = Plutus.PubKeyCredential $ Plutus.PubKeyHash    $ PlutusTx.toBuiltin $ Api.serialiseToRawBytes x
-fromCardanoStakeCredential (Api.S.StakeCredentialByScript x) = Plutus.ScriptCredential $ Plutus.ValidatorHash $ PlutusTx.toBuiltin $ Api.serialiseToRawBytes x
+fromCardanoStakeCredential (Api.S.StakeCredentialByScript x) = Plutus.ScriptCredential $ Plutus.ScriptHash $ PlutusTx.toBuiltin $ Api.serialiseToRawBytes x
 
 -- | Used to inject wallet pubkeyhashes into addresses.
 --
@@ -188,7 +200,7 @@ addressFromPlutus nid addr =
 
     credential :: Plutus.Credential -> Maybe (Ledger.Credential kr Ledger.StandardCrypto)
     credential (Plutus.PubKeyCredential (Plutus.PubKeyHash    (Plutus.BuiltinByteString bs))) = Ledger.KeyHashObj    . Ledger.KeyHash    <$> Crypto.hashFromBytes bs
-    credential (Plutus.ScriptCredential (Plutus.ValidatorHash (Plutus.BuiltinByteString bs))) = Ledger.ScriptHashObj . Ledger.ScriptHash <$> Crypto.hashFromBytes bs
+    credential (Plutus.ScriptCredential (Plutus.ScriptHash (Plutus.BuiltinByteString bs))) = Ledger.ScriptHashObj . Ledger.ScriptHash <$> Crypto.hashFromBytes bs
 
     paymentCredential :: Maybe (Ledger.PaymentCredential Ledger.StandardCrypto)
     paymentCredential = credential $ Plutus.addressCredential addr
@@ -207,6 +219,24 @@ addressFromPlutus nid addr =
         | n < 0                            = Nothing
         | n > toInteger (maxBound @Word64) = Nothing
         | otherwise                        = Just $ fromInteger n
+
+-- | If an address is a shelley address, then we'll return payment credential wrapped in `Just`, `Nothing` otherwise.
+--
+-- >>> addressToPaymentCredential addr
+-- Just (GYPaymentCredentialByKey (GYPubKeyHash "e1cbb80db89e292269aeb93ec15eb963dda5176b66949fe1c2a6a38d"))
+-- >>> addressToPaymentCredential addrScript
+-- Just (GYPaymentCredentialByScript (GYValidatorHash "178155803bc461c5b0b371c779cb481ec7420df0c619cd9860e570d2"))
+-- >>> addressToPaymentCredential addrByron1
+-- Nothing
+-- >>> addressToPaymentCredential addrByron2
+-- Nothing
+addressToPaymentCredential :: GYAddress -> Maybe GYPaymentCredential
+addressToPaymentCredential (addressToApi -> Api.AddressShelley addr) = Just $ getShelleyAddressPaymentCredential addr
+addressToPaymentCredential _byron = Nothing
+
+-- | Get payment credential part of a shelley address.
+getShelleyAddressPaymentCredential :: Api.S.Address Api.ShelleyAddr -> GYPaymentCredential
+getShelleyAddressPaymentCredential (Api.S.ShelleyAddress _network credential _stake) = Api.S.fromShelleyPaymentCredential credential & paymentCredentialFromApi
 
 -- | Create address from 'GYPubKeyHash'.
 --
@@ -316,7 +346,7 @@ instance Web.ToHttpApiData GYAddress where
 -- Right (unsafeAddressFromText "addr_test1qrsuhwqdhz0zjgnf46unas27h93amfghddnff8lpc2n28rgmjv8f77ka0zshfgssqr5cnl64zdnde5f8q2xt923e7ctqu49mg5")
 --
 -- >>> Web.parseUrlPiece @GYAddress "00"
--- Left "Not an address: 00; Reason: RawBytesHexErrorRawBytesDecodeFail \"00\""
+-- Left "Not an address: 00; Reason: RawBytesHexErrorRawBytesDecodeFail \"00\" AddressAny (SerialiseAsRawBytesError {unSerialiseAsRawBytesError = \"Unable to deserialise AddressAny\"})"
 --
 instance Web.FromHttpApiData GYAddress where
     parseUrlPiece t = case Api.deserialiseFromRawBytesHex Api.AsAddressAny (TE.encodeUtf8 t) of
@@ -396,7 +426,7 @@ instance Swagger.ToSchema GYAddress where
 -- "addr_test1qrsuhwqdhz0zjgnf46unas27h93amfghddnff8lpc2n28rgmjv8f77ka0zshfgssqr5cnl64zdnde5f8q2xt923e7ctqu49mg5"
 --
 newtype GYAddressBech32 = GYAddressBech32 GYAddress
-  deriving newtype (Show, Printf.PrintfArg)
+  deriving newtype (Show, Eq, Ord, Printf.PrintfArg)
 
 addressToBech32 :: GYAddress -> GYAddressBech32
 addressToBech32 = coerce

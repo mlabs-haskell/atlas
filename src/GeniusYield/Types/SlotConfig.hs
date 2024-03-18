@@ -19,7 +19,9 @@ module GeniusYield.Types.SlotConfig (
 ) where
 
 import           Control.Monad                        (unless, (<$!>))
-import           Control.Monad.Except                 (Except, MonadError (throwError), runExcept)
+import           Control.Monad.Except                 (Except,
+                                                       MonadError (throwError),
+                                                       runExcept)
 import           Data.Fixed                           (div')
 import           Data.Foldable                        (toList)
 import           Data.Functor                         (($>))
@@ -33,9 +35,9 @@ import           Data.Word                            (Word64)
 import qualified Cardano.Api                          as Api
 import qualified Cardano.Slotting.Slot                as CSlot
 import qualified Cardano.Slotting.Time                as CSlot
+import qualified Data.SOP.Counting                    as Ouroboros
 import qualified Ouroboros.Consensus.BlockchainTime   as Ouroboros
 import qualified Ouroboros.Consensus.HardFork.History as Ouroboros
-import qualified Ouroboros.Consensus.Util.Counting    as Ouroboros
 
 import           GeniusYield.CardanoApi.EraHistory
 import           GeniusYield.Types.Slot
@@ -161,7 +163,7 @@ slotToBeginPOSIXTime' (GYSlotConfig sysStart slotConfs) slot = Time.utcTimeToPOS
         `CSlot.addRelativeTime` gyEraSlotZeroTime
     GYEraSlotConfig { gyEraSlotZeroTime, gyEraSlotStart, gyEraSlotLength } = findSlotConf slotConfs
     {- Finds the slot config for the given slot. Essentially, the chosen slot config must have its starting slot
-    greater than, or equal to, the given slot. Furthermore, the chosen slot config's end slot, i.e next slot config's
+    less than, or equal to, the given slot. Furthermore, the chosen slot config's end slot, i.e next slot config's
     starting slot (or unbounded if final era), should be greater than the given slot.
     -}
     findSlotConf (x :| []) = x

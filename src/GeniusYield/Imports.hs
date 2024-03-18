@@ -16,10 +16,10 @@ module GeniusYield.Imports (
     lazyDecodeUtf8Lenient,
     hush,
     hoistMaybe,
-    singleton
 ) where
 
 import           Control.Applicative        as X (liftA2)
+import           Control.Arrow              as X ((>>>))
 import           Control.Exception          as X (Exception, catch, throwIO)
 import           Control.Monad              as X (ap, foldM, forM, forM_, guard,
                                                   join, unless, when)
@@ -107,9 +107,3 @@ hush = either (const Nothing) Just
 -- __NOTE:__ This is also defined (& exported) in @transformers-0.6.0.0@, so should be removed once we upgrade to it.
 hoistMaybe :: (Applicative m) => Maybe b -> MaybeT m b
 hoistMaybe = MaybeT . pure
-
--- | Produce singleton list.
---
--- __NOTE:__ This is also defined (& exported) in @base-0.15.0.0@, so should be removed once we upgrade to it.
-singleton :: a -> [a]
-singleton x = [x]
