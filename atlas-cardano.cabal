@@ -106,7 +106,6 @@ library
     GeniusYield.TxBuilder.Node
     GeniusYield.TxBuilder.NodeQuery
     GeniusYield.TxBuilder.Random
-    GeniusYield.TxBuilder.Run
     GeniusYield.Types
     GeniusYield.Types.Ada
     GeniusYield.Types.Address
