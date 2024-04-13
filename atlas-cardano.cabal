@@ -106,7 +106,6 @@ library
     GeniusYield.TxBuilder.Node
     GeniusYield.TxBuilder.NodeQuery
     GeniusYield.TxBuilder.Random
-    GeniusYield.TxBuilder.Run
     GeniusYield.Types
     GeniusYield.Types.Ada
     GeniusYield.Types.Address
@@ -358,7 +357,6 @@ test-suite suite
     , tasty
     , tasty-hunit
     , mtl
-    , plutus-simple-model
     -- OnChain
     , plutus-core
     , plutus-ledger-api
