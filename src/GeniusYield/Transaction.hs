@@ -73,6 +73,7 @@ import qualified Cardano.Api                           as Api
 import qualified Cardano.Api.Shelley                   as Api.S
 import qualified Cardano.Ledger.Alonzo.Scripts         as AlonzoScripts
 import qualified Cardano.Ledger.Alonzo.Tx              as AlonzoTx
+import qualified Cardano.Ledger.Alonzo.Core            as AlonzoCore
 import           Cardano.Slotting.Time                 (SystemStart)
 
 import           Cardano.Ledger.Core                   (EraTx (sizeTxF))
@@ -88,8 +89,8 @@ import           GeniusYield.Types
 -- | A container for various network parameters, and user wallet information, used by balancer.
 data GYBuildTxEnv = GYBuildTxEnv
     { gyBTxEnvSystemStart    :: !SystemStart
-    , gyBTxEnvEraHistory     :: !(Api.EraHistory Api.CardanoMode)
-    , gyBTxEnvProtocolParams :: !(Api.S.BundledProtocolParameters Api.S.BabbageEra)
+    , gyBTxEnvEraHistory     :: !Api.EraHistory
+    , gyBTxEnvProtocolParams :: !(AlonzoCore.PParams (Api.S.ShelleyLedgerEra Api.S.BabbageEra))
     , gyBTxEnvPools          :: !(Set Api.S.PoolId)
     , gyBTxEnvOwnUtxos       :: !GYUTxOs
     -- ^ own utxos available for use as additional input
@@ -275,7 +276,8 @@ balanceTxStep
                             . adjustTxOut (minimumUTxO pp)
                     , maxValueSize    = fromMaybe
                                             (error "protocolParamMaxValueSize missing from protocol params")
-                                            $ Api.S.protocolParamMaxValueSize $ Api.S.unbundleProtocolParams pp
+                                            $ Api.S.protocolParamMaxValueSize
+                                              $ Api.S.fromLedgerPParams Api.ShelleyBasedEraBabbage pp
                     }
                 cstrat
             pure (ins ++ addIns, collaterals, adjustedOuts ++ changeOuts)
@@ -283,8 +285,8 @@ balanceTxStep
     isScriptWitness GYTxInWitnessKey      = False
     isScriptWitness GYTxInWitnessScript{} = True
 
-retColSup :: Api.S.TxTotalAndReturnCollateralSupportedInEra Api.S.BabbageEra
-retColSup = Api.TxTotalAndReturnCollateralInBabbageEra
+retColSup :: Api.BabbageEraOnwards Api.BabbageEra
+retColSup = Api.BabbageEraOnwardsBabbage
 
 finalizeGYBalancedTx :: GYBuildTxEnv -> GYBalancedTx v -> Int -> Either BuildTxException GYTxBody
 finalizeGYBalancedTx
@@ -319,7 +321,7 @@ finalizeGYBalancedTx
     inRefs :: Api.TxInsReference Api.BuildTx Api.BabbageEra
     inRefs = case inRefs' of
         [] -> Api.TxInsReferenceNone
-        _  -> Api.TxInsReference Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra inRefs'
+        _  -> Api.TxInsReference Api.BabbageEraOnwardsBabbage inRefs'
 
     inRefs' :: [Api.TxIn]
     inRefs' = [ txOutRefToApi r | r <- utxosRefs utxosRefInputs ]
@@ -341,33 +343,30 @@ finalizeGYBalancedTx
     collaterals' :: Api.TxInsCollateral Api.BabbageEra
     collaterals' = case utxosRefs collaterals of
         []    -> Api.TxInsCollateralNone
-        orefs -> Api.TxInsCollateral Api.CollateralInBabbageEra $ txOutRefToApi <$> orefs
+        orefs -> Api.TxInsCollateral Api.AlonzoEraOnwardsBabbage $ txOutRefToApi <$> orefs
 
     -- will be filled by makeTransactionBodyAutoBalance
     fee :: Api.TxFee Api.BabbageEra
-    fee = Api.TxFeeExplicit Api.TxFeesExplicitInBabbageEra $ Api.Lovelace 0
+    fee = Api.TxFeeExplicit Api.ShelleyBasedEraBabbage $ Api.Lovelace 0
 
     lb' :: Api.TxValidityLowerBound Api.BabbageEra
     lb' = maybe
         Api.TxValidityNoLowerBound
-        (Api.TxValidityLowerBound Api.ValidityLowerBoundInBabbageEra . slotToApi)
+        (Api.TxValidityLowerBound Api.AllegraEraOnwardsBabbage . slotToApi)
         lb
 
     ub' :: Api.TxValidityUpperBound Api.BabbageEra
-    ub' = maybe
-        (Api.TxValidityNoUpperBound Api.ValidityNoUpperBoundInBabbageEra)
-        (Api.TxValidityUpperBound Api.ValidityUpperBoundInBabbageEra . slotToApi)
-        ub
+    ub' = Api.TxValidityUpperBound Api.ShelleyBasedEraBabbage $ slotToApi <$> ub
 
     extra :: Api.TxExtraKeyWitnesses Api.BabbageEra
     extra = case toList signers of
         []   -> Api.TxExtraKeyWitnessesNone
-        pkhs -> Api.TxExtraKeyWitnesses Api.ExtraKeyWitnessesInBabbageEra $ pubKeyHashToApi <$> pkhs
+        pkhs -> Api.TxExtraKeyWitnesses Api.AlonzoEraOnwardsBabbage $ pubKeyHashToApi <$> pkhs
 
     mint :: Api.TxMintValue Api.BuildTx Api.BabbageEra
     mint = case mmint of
         Nothing      -> Api.TxMintNone
-        Just (v, xs) -> Api.TxMintValue Api.MultiAssetInBabbageEra (valueToApi v) $ Api.BuildTxWith $ Map.fromList
+        Just (v, xs) -> Api.TxMintValue Api.MaryEraOnwardsBabbage (valueToApi v) $ Api.BuildTxWith $ Map.fromList
             [ ( mintingPolicyApiIdFromWitness p
               , gyMintingScriptWitnessToApiPlutusSW p
                       (redeemerToApi r)
@@ -400,16 +399,19 @@ finalizeGYBalancedTx
         dummyTotCol
         dummyRetCol
         fee
-        (lb', ub')
+        lb'
+        ub'
         Api.TxMetadataNone
         Api.TxAuxScriptsNone
         extra
-        (Api.BuildTxWith $ Just $ Api.S.unbundleProtocolParams pp)
+        (Api.BuildTxWith $ Just $ Api.S.LedgerProtocolParameters pp)
         Api.TxWithdrawalsNone
         Api.TxCertificatesNone
         Api.TxUpdateProposalNone
         mint
         Api.TxScriptValidityNone
+        Nothing
+        Nothing
 
 {- | Wraps around 'Api.makeTransactionBodyAutoBalance' just to verify the final ex units and tx size are within limits.
 
@@ -417,8 +419,8 @@ If not checked, the returned txbody may fail during submission.
 -}
 makeTransactionBodyAutoBalanceWrapper :: GYUTxOs
                                       -> SystemStart
-                                      -> Api.S.EraHistory Api.S.CardanoMode
-                                      -> Api.S.BundledProtocolParameters Api.S.BabbageEra
+                                      -> Api.S.EraHistory
+                                      -> AlonzoCore.PParams (Api.S.ShelleyLedgerEra Api.S.BabbageEra)
                                       -> Set Api.S.PoolId
                                       -> Api.S.UTxO Api.S.BabbageEra
                                       -> Api.S.TxBodyContent Api.S.BuildTx Api.S.BabbageEra
@@ -426,22 +428,26 @@ makeTransactionBodyAutoBalanceWrapper :: GYUTxOs
                                       -> Int
                                       -> Either BuildTxException GYTxBody
 makeTransactionBodyAutoBalanceWrapper collaterals ss eh pp ps utxos body changeAddr numSkeletonOuts = do
+    let apiPp = Api.S.fromLedgerPParams Api.ShelleyBasedEraBabbage pp
     Api.ExecutionUnits
         { executionSteps  = maxSteps
         , executionMemory = maxMemory
-        } <- maybeToRight BuildTxMissingMaxExUnitsParam $ Api.S.protocolParamMaxTxExUnits $ Api.S.unbundleProtocolParams pp
-    let maxTxSize = Api.S.protocolParamMaxTxSize $ Api.S.unbundleProtocolParams pp
+        } <- maybeToRight BuildTxMissingMaxExUnitsParam $ Api.S.protocolParamMaxTxExUnits apiPp
+    let maxTxSize = Api.S.protocolParamMaxTxSize apiPp
         changeAddrApi :: Api.S.AddressInEra Api.S.BabbageEra = addressToApi' changeAddr
         stakeDelegDeposits = mempty  -- TODO: Currently it's empty as we don't support for unregistration!
+        drepDelegDeposits = mempty -- TODO:
 
     -- First we obtain the calculated fees to correct for our collaterals.
     bodyBeforeCollUpdate@(Api.BalancedTxBody _ _ _ (Api.Lovelace feeOld)) <-
       first BuildTxBodyErrorAutoBalance $ Api.makeTransactionBodyAutoBalance
+        Api.ShelleyBasedEraBabbage
         ss
         (Api.toLedgerEpochInfo eh)
-        (Api.S.unbundleProtocolParams pp)
+        (Api.S.LedgerProtocolParameters pp)
         ps
         stakeDelegDeposits
+        drepDelegDeposits
         utxos
         body
         changeAddrApi
@@ -454,7 +460,9 @@ makeTransactionBodyAutoBalanceWrapper collaterals ss eh pp ps utxos body changeA
 
         collateralTotalValue :: GYValue = foldMapUTxOs utxoValue collaterals
         collateralTotalLovelace :: Integer = fst $ valueSplitAda collateralTotalValue
-        balanceNeeded :: Integer = ceiling $ (feeOld * toInteger (fromJust $ Api.S.protocolParamCollateralPercent $ Api.S.unbundleProtocolParams pp)) % 100
+        balanceNeeded :: Integer = ceiling $
+                                    (feeOld * toInteger
+                                      (fromJust $ Api.S.protocolParamCollateralPercent apiPp)) % 100
 
       in do
 
@@ -465,14 +473,19 @@ makeTransactionBodyAutoBalanceWrapper collaterals ss eh pp ps utxos body changeA
             , Api.TxReturnCollateral retColSup $ txOutToApi $ GYTxOut changeAddr (collateralTotalValue `valueMinus` valueFromLovelace balanceNeeded) Nothing Nothing
 
             )
-          else Left $ BuildTxCollateralShortFall (fromInteger balanceNeeded) (fromInteger collateralTotalLovelace) -- In this case `makeTransactionBodyAutoBalance` doesn't return an error but instead returns `(Api.TxTotalCollateralNone, Api.TxReturnCollateralNone)`
+          else Left $ BuildTxCollateralShortFall (fromInteger balanceNeeded) (fromInteger collateralTotalLovelace)
+
+          -- In this case `makeTransactionBodyAutoBalance` doesn't return
+          -- an error but instead returns `(Api.TxTotalCollateralNone, Api.TxReturnCollateralNone)`
 
         first BuildTxBodyErrorAutoBalance $ Api.makeTransactionBodyAutoBalance
+          Api.ShelleyBasedEraBabbage
           ss
           (Api.toLedgerEpochInfo eh)
-          (Api.S.unbundleProtocolParams pp)
+          (Api.S.LedgerProtocolParameters pp)
           ps
           stakeDelegDeposits
+          drepDelegDeposits
           utxos
           body {Api.txTotalCollateral = txColl, Api.txReturnCollateral = collRet}
           changeAddrApi
@@ -525,7 +538,9 @@ collapseExtraOut apiOut@(Api.TxOut _ outVal _ _) bodyContent@Api.TxBodyContent {
         ((Api.TxOut sOutAddr sOutVal sOutDat sOutRefScript) : remOuts) ->
           let
 
-            nOutVal = Api.TxOutValue Api.MultiAssetInBabbageEra $ foldMap' Api.txOutValueToValue [sOutVal, outVal]
+            nOutVal = Api.TxOutValueShelleyBased Api.ShelleyBasedEraBabbage
+                        $ Api.toLedgerValue Api.MaryEraOnwardsBabbage
+                        $ foldMap' Api.txOutValueToValue [sOutVal, outVal]
 
             -- nOut == new Out == The merging of both apiOut and sOut
             nOut = Api.TxOut sOutAddr nOutVal sOutDat sOutRefScript
@@ -533,6 +548,7 @@ collapseExtraOut apiOut@(Api.TxOut _ outVal _ _) bodyContent@Api.TxBodyContent {
             nOuts = skeletonOuts ++ remOuts ++ [nOut]
 
           in
-            Api.S.createAndValidateTransactionBody $ bodyContent { Api.txOuts = nOuts }
+            Api.S.createAndValidateTransactionBody Api.ShelleyBasedEraBabbage
+              $ bodyContent { Api.txOuts = nOuts }
   where
     (skeletonOuts, changeOuts) = splitAt numSkeletonOuts txOuts

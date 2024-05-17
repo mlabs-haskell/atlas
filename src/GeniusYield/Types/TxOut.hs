@@ -73,15 +73,15 @@ txOutToApi
     -> Api.TxOut Api.CtxTx Api.BabbageEra
 txOutToApi (GYTxOut addr v md mrs) = Api.TxOut
     (addressToApi' addr)
-    (Api.TxOutValue Api.MultiAssetInBabbageEra $ valueToApi v)
+    (valueToApiTxOutValue v)
     (mkDatum md)
-    (maybe Api.S.ReferenceScriptNone (Api.S.ReferenceScript Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra . Api.toScriptInAnyLang . Api.PlutusScript Api.S.PlutusScriptV2 . scriptToApi) mrs)
+    (maybe Api.S.ReferenceScriptNone (Api.S.ReferenceScript Api.S.BabbageEraOnwardsBabbage . Api.toScriptInAnyLang . Api.PlutusScript Api.S.PlutusScriptV2 . scriptToApi) mrs)
   where
     mkDatum :: Maybe (GYDatum, GYTxOutUseInlineDatum v) -> Api.TxOutDatum Api.CtxTx Api.BabbageEra
     mkDatum Nothing        = Api.TxOutDatumNone
     mkDatum (Just (d, di))
-        | di'       = Api.TxOutDatumInline Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra d'
-        | otherwise = Api.TxOutDatumInTx Api.ScriptDataInBabbageEra d'
+        | di'       = Api.TxOutDatumInline Api.BabbageEraOnwardsBabbage d'
+        | otherwise = Api.TxOutDatumInTx Api.AlonzoEraOnwardsBabbage d'
       where
         d' = datumToApi' d
 
