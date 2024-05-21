@@ -75,6 +75,8 @@ import qualified Cardano.Api.Shelley                   as Api.S
 import qualified Cardano.Ledger.Alonzo.Scripts         as AlonzoScripts
 import qualified Cardano.Ledger.Alonzo.Tx              as AlonzoTx
 import qualified Cardano.Ledger.Alonzo.Core            as AlonzoCore
+import qualified Cardano.Ledger.Babbage                as Babbage
+import qualified Cardano.Ledger.Crypto                 as Ledger
 import           Cardano.Slotting.Time                 (SystemStart)
 
 import qualified Cardano.Api.Shelley                   as Api
@@ -107,7 +109,7 @@ utxoFromTxInDetailed (GYTxInDetailed (GYTxIn ref _witns) addr val d ms) = GYUTxO
 
 data BuildTxException
     = BuildTxBalancingError !BalancingError
-    | BuildTxBodyErrorAutoBalance !Api.TxBodyErrorAutoBalance
+    | BuildTxBodyErrorAutoBalance !(Api.TxBodyErrorAutoBalance Api.S.BabbageEra)
     | BuildTxPPConversionError !Api.ProtocolParametersConversionError
     | BuildTxMissingMaxExUnitsParam
     -- ^ Missing max ex units in protocol params
