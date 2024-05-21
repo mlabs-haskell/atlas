@@ -277,6 +277,7 @@ test-suite atlas-tests
     , base
     , bytestring
     , cardano-api           ^>= 8.38.0.0
+    , cardano-ledger-alonzo
     , clb
     , containers
     , data-default
