@@ -222,7 +222,6 @@ library
     , cardano-ledger-alonzo
     , cardano-ledger-babbage
     , cardano-ledger-binary
-    , cardano-ledger-pretty
     , cardano-slotting
     , cardano-strict-containers
     , cardano-wallet-primitive
