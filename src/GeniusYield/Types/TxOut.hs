@@ -15,11 +15,9 @@ module GeniusYield.Types.TxOut (
     txOutToApi,
 ) where
 
-import           Control.Lens                    (Traversal)
-
 import qualified Cardano.Api                     as Api
 import qualified Cardano.Api.Shelley             as Api.S
-
+import           Control.Lens                    (Traversal)
 import           GeniusYield.Types.Address
 import           GeniusYield.Types.Datum
 import           GeniusYield.Types.PlutusVersion
@@ -35,7 +33,7 @@ data GYTxOut (v :: PlutusVersion) = GYTxOut
     { gyTxOutAddress :: !GYAddress
     , gyTxOutValue   :: !GYValue
     , gyTxOutDatum   :: !(Maybe (GYDatum, GYTxOutUseInlineDatum v))  -- ^ The Boolean indicates whether to use inline datums or not. May be overridden by a flag to 'txOutToApi'.
-    , gyTxOutRefS    :: !(Maybe (GYScript 'PlutusV2))
+    , gyTxOutRefS    :: !(Maybe GYAnyScript)
     } deriving stock (Eq, Show)
 
 data GYTxOutUseInlineDatum (v :: PlutusVersion) where
@@ -73,15 +71,21 @@ txOutToApi
     -> Api.TxOut Api.CtxTx Api.BabbageEra
 txOutToApi (GYTxOut addr v md mrs) = Api.TxOut
     (addressToApi' addr)
-    (Api.TxOutValue Api.MultiAssetInBabbageEra $ valueToApi v)
+    (valueToApiTxOutValue v)
     (mkDatum md)
-    (maybe Api.S.ReferenceScriptNone (Api.S.ReferenceScript Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra . Api.toScriptInAnyLang . Api.PlutusScript Api.S.PlutusScriptV2 . scriptToApi) mrs)
+    (maybe Api.S.ReferenceScriptNone (Api.S.ReferenceScript Api.S.BabbageEraOnwardsBabbage . resolveOutputScript) mrs)
   where
+
+    resolveOutputScript (GYSimpleScript s) = Api.ScriptInAnyLang Api.SimpleScriptLanguage (Api.SimpleScript $ simpleScriptToApi s)
+    resolveOutputScript (GYPlutusScript s) =
+        let version = singPlutusVersionToApi $ scriptVersion s
+        in Api.ScriptInAnyLang (Api.PlutusScriptLanguage version) (Api.PlutusScript version (scriptToApi s))
+
     mkDatum :: Maybe (GYDatum, GYTxOutUseInlineDatum v) -> Api.TxOutDatum Api.CtxTx Api.BabbageEra
     mkDatum Nothing        = Api.TxOutDatumNone
     mkDatum (Just (d, di))
-        | di'       = Api.TxOutDatumInline Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra d'
-        | otherwise = Api.TxOutDatumInTx Api.ScriptDataInBabbageEra d'
+        | di'       = Api.TxOutDatumInline Api.BabbageEraOnwardsBabbage d'
+        | otherwise = Api.TxOutDatumInTx Api.AlonzoEraOnwardsBabbage d'
       where
         d' = datumToApi' d
 

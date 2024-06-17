@@ -17,6 +17,7 @@ module GeniusYield.TxBuilder.Common
 
 import qualified Cardano.Api                    as Api
 import qualified Cardano.Api.Shelley            as Api.S
+import qualified Cardano.Ledger.Alonzo.Core     as Ledger
 import           Control.Applicative            ((<|>))
 import           Data.List.NonEmpty             (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty             as NE
@@ -62,8 +63,8 @@ The function recovers successfully built tx skeletons, in case the list contains
 buildTxCore
     :: forall m f v. (GYTxQueryMonad m, MonadRandom m, Traversable f)
     => Api.SystemStart
-    -> Api.EraHistory Api.CardanoMode
-    -> Api.S.BundledProtocolParameters Api.S.BabbageEra
+    -> Api.EraHistory
+    -> Ledger.PParams (Api.S.ShelleyLedgerEra Api.S.BabbageEra)
     -> Set Api.S.PoolId
     -> GYCoinSelectionStrategy
     -> (GYTxBody -> GYUTxOs -> GYUTxOs)
@@ -120,6 +121,7 @@ buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change reservedCollateral ac
                       else throwError $ GYDatumMismatch utxoOutDatum gyTxIn
                       where
                         checkDatumMatch _ GYTxInWitnessKey = True
+                        checkDatumMatch _ GYTxInWitnessSimpleScript{} = True
                         checkDatumMatch ud (GYTxInWitnessScript _ wd _) = case ud of
                           GYOutDatumNone       -> False
                           GYOutDatumHash h     -> h == hashDatum wd
@@ -132,7 +134,7 @@ buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change reservedCollateral ac
                     find
                       (\u ->
                         let v = utxoValue u
-                            maximumRequiredCollateralValue' = maximumRequiredCollateralValue $ Api.S.unbundleProtocolParams pp
+                            maximumRequiredCollateralValue' = maximumRequiredCollateralValue $ Api.S.fromLedgerPParams Api.ShelleyBasedEraBabbage pp
                             -- Following depends on that we allow unsafe, i.e., negative coins count below. In future, we can take magnitude instead.
                             vWithoutMaxCollPledge = v `valueMinus` maximumRequiredCollateralValue'
                             worstCaseCollOutput = mkGYTxOutNoDatum change vWithoutMaxCollPledge
