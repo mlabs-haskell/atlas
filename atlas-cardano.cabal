@@ -78,6 +78,7 @@ library
     GeniusYield.Providers.GCP
     GeniusYield.Providers.Katip
     GeniusYield.Providers.Kupo
+    GeniusYield.Providers.LiteChainIndex
     GeniusYield.Providers.Maestro
     GeniusYield.Providers.Node
     GeniusYield.Providers.Sentry
@@ -155,6 +156,7 @@ library
 
   other-modules:   GeniusYield.Utils
   build-depends:
+    , async                 ^>=2.2.5
     , aeson                 ^>=2.2.1.0
     , attoparsec            ^>=0.14.4
     , base                  ^>=4.18.2.0
@@ -192,6 +194,7 @@ library
     , servant-client-core   ^>=0.20
     , some                  ^>=1.0.5
     , sop-extras            ^>=0.1.0.0
+    , stm                   ^>=2.5.1.0
     , swagger2              ^>=2.8.7
     , tasty                 ^>=1.5
     , tasty-hunit           ^>=0.10.0.3
