@@ -13,31 +13,16 @@ module GeniusYield.Test.RefInput
     ( refInputTests
     ) where
 
-import           Control.Monad.Reader
 import           Test.Tasty                                           (TestTree,
                                                                        testGroup)
 
 import           GeniusYield.Imports
+import           GeniusYield.Test.Clb
 import           GeniusYield.Test.GYTxBody                            (mockTxId)
 import           GeniusYield.Test.OnChain.GuessRefInputDatum.Compiled
 import           GeniusYield.Test.Utils
 import           GeniusYield.TxBuilder
-import           GeniusYield.TxBuilder.Clb
 import           GeniusYield.Types
-import Clb qualified (
-  Clb,
-  ClbState (mockInfo),
-  initClb,
-  checkErrors,
-  OnChainTx (getOnChainTx),
-  MockConfig,
-  ppLog,
-  runClb,
-  intToKeyPair,
-  defaultBabbage,
-  waitSlot,
- )
-import qualified Cardano.Ledger.Shelley.API as L
 
 gyGuessRefInputDatumValidator :: GYValidator 'PlutusV2
 gyGuessRefInputDatumValidator = validatorFromPlutus guessRefInputDatumValidator

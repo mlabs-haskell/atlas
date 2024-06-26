@@ -1,14 +1,14 @@
 {-# LANGUAGE LambdaCase #-}
 
 {-|
-Module      : GeniusYield.TxBuilder.Clb
+Module      : GeniusYield.Test.Clb
 Copyright   : (c) 2023 GYELD GMBH
 License     : Apache 2.0
 Maintainer  : support@geniusyield.co
 Stability   : develop
 
 -}
-module GeniusYield.TxBuilder.Clb
+module GeniusYield.Test.Clb
     ( Wallet (..)
     , WalletName
     , GYTxRunState (..)
@@ -105,7 +105,7 @@ newtype GYTxRunEnv = GYTxRunEnv { runEnvWallet :: Wallet }
 type FeesLovelace = Sum Integer
 type MinAdaLovelace = Sum Integer
 
--- Used by 'withWalletBalancesCheckSimple' (not yet)
+-- Used by 'withWalletBalancesCheckSimple'
 newtype GYTxRunState = GYTxRunState { walletExtraLovelace :: Map WalletName (FeesLovelace, MinAdaLovelace) }
 
 newtype GYTxMonadClb a = GYTxMonadClb

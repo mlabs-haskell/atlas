@@ -73,6 +73,7 @@ import           Test.Tasty.HUnit                 (assertFailure, testCaseInfo)
 
 import           GeniusYield.Imports
 import           GeniusYield.Test.Address
+import           GeniusYield.Test.Clb
 import           GeniusYield.Test.FakeCoin
 import           GeniusYield.TxBuilder
 import           GeniusYield.Types
@@ -212,7 +213,7 @@ walletPubKeyHash = fromJust . addressToPubKeyHash . walletAddress
 {- | Gets the balance from anything that `HasAddress`. The usual case will be a
      testing wallet.
 -}
-balance :: HasAddress a => a -> GYTxMonadClb GYValue
+balance :: (GYTxMonad m, HasAddress a, MonadFail m) => a -> m GYValue
 balance a = do
     nid <- networkId
     case addressFromPlutus nid $ toAddress a of
