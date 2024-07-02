@@ -45,7 +45,7 @@ assertThrown p action = do
     name = show (typeRep (Proxy @e))
 
 -- | Asserts if the user funds change as expected. This function subtracts fees from the given expected value.
-assertUserFunds :: Integer -> Ctx -> User -> GYValue -> IO ()
+assertUserFunds :: Integer -> Ctx -> Wallet -> GYValue -> IO ()
 assertUserFunds fees ctx u expectedValue = do
     currentValue <- ctxQueryBalance ctx u
     let expectedValue' = expectedValue `valueMinus` valueFromLovelace fees

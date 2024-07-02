@@ -10,15 +10,12 @@ Stability   : develop
 -}
 module GeniusYield.Test.Clb
     ( Wallet (..)
-    , WalletName
-    , GYTxRunState (..)
+    , walletPubKeyHash
     , GYTxMonadClb
-    , walletAddress
     , asClb
     , asRandClb
     , liftClb
     , ownAddress
-    , sendSkeleton
     , sendSkeleton'
     , sendSkeletonWithWallets
     , dumpUtxoState
@@ -48,17 +45,17 @@ import qualified Cardano.Api.Script                        as Api
 import qualified Cardano.Api.Shelley                       as Api.S
 import qualified Cardano.Ledger.Address                    as L
 import qualified Cardano.Ledger.Alonzo.Core                as AlonzoCore
+import qualified Cardano.Ledger.Shelley.API                as L
 import qualified Cardano.Ledger.Api                        as L
 import qualified Cardano.Ledger.Babbage.TxOut              as L
 import qualified Cardano.Ledger.Compactible                as L
 import qualified Cardano.Ledger.Plutus.TxInfo              as L
 import qualified Cardano.Ledger.Shelley.API                as L.S
-import qualified Cardano.Ledger.UTxO                       as L
 import           Cardano.Slotting.Time                     (RelativeTime (RelativeTime),
                                                             mkSlotLength)
 import           Clb                                       (ClbState (..), ClbT, EmulatedLedgerState (..),
                                                             Log (Log), LogEntry (LogEntry), LogLevel (..),
-                                                            MockConfig(..), OnChainTx, SlotConfig(..),
+                                                            MockConfig(..), OnChainTx (getOnChainTx), SlotConfig(..),
                                                             ValidationResult (..), getCurrentSlot, txOutRefAt,
                                                             txOutRefAtPaymentCred, sendTx, fromLog, unLog, getFails,
                                                             logInfo, logError)
@@ -73,43 +70,21 @@ import           GeniusYield.Transaction                   (GYCoinSelectionStrat
                                                             BalancingError(BalancingErrorInsufficientFunds))
 import           GeniusYield.Transaction.Common            (adjustTxOut,
                                                             minimumUTxO)
-import           GeniusYield.Test.Address
+import           GeniusYield.Test.Utils
 import           GeniusYield.TxBuilder.Class
 import           GeniusYield.TxBuilder.Common
 import           GeniusYield.TxBuilder.Errors
 import           GeniusYield.Types
+import GeniusYield.HTTP.Errors (someBackendError)
+import qualified Data.Text as T
 
 -- FIXME: Fix this type synonym upstream.
 type Clb = ClbT Identity
 
-type WalletName = String
-
--- | Testing Wallet representation.
-data Wallet = Wallet
-    { walletPaymentSigningKey :: !GYPaymentSigningKey
-    , walletNetworkId         :: !GYNetworkId
-    , walletName              :: !WalletName
-    }
-    deriving (Show, Eq, Ord)
-
--- | Gets a GYAddress of a testing wallet.
-walletAddress :: Wallet -> GYAddress
-walletAddress Wallet{..} = addressFromPaymentKeyHash walletNetworkId $ paymentKeyHash $
-                           paymentVerificationKey walletPaymentSigningKey
-
-instance HasAddress Wallet where
-    toAddress = addressToPlutus . walletAddress
-
 newtype GYTxRunEnv = GYTxRunEnv { runEnvWallet :: Wallet }
 
-type FeesLovelace = Sum Integer
-type MinAdaLovelace = Sum Integer
-
--- Used by 'withWalletBalancesCheckSimple'
-newtype GYTxRunState = GYTxRunState { walletExtraLovelace :: Map WalletName (FeesLovelace, MinAdaLovelace) }
-
 newtype GYTxMonadClb a = GYTxMonadClb
-    { unGYTxMonadClb :: ExceptT (Either String GYTxMonadException) (StateT GYTxRunState (ReaderT GYTxRunEnv (RandT StdGen Clb))) a
+    { unGYTxMonadClb :: ExceptT GYTxMonadException (StateT GYTxRunState (ReaderT GYTxRunEnv (RandT StdGen Clb))) a
     }
     deriving newtype (Functor, Applicative, Monad, MonadReader GYTxRunEnv, MonadState GYTxRunState)
 
@@ -125,9 +100,8 @@ asRandClb :: Wallet
 asRandClb w m = do
     e <- runReaderT (evalStateT (runExceptT $ unGYTxMonadClb m) $ GYTxRunState Map.empty) $ GYTxRunEnv w
     case e of
-        Left (Left err)  -> lift (logError err) >> return Nothing
-        Left (Right err) -> lift (logError (show err)) >> return Nothing
-        Right a          -> return $ Just a
+        Left err -> lift (logError (show err)) >> return Nothing
+        Right a  -> return $ Just a
 
 asClb :: StdGen
       -> Wallet
@@ -155,7 +129,10 @@ mustFail act = do
         st <- get
         preFails <- getFails
         pure (st, preFails)
-    void $ act
+    -- FIXME: Should we ignore all application errors to prioritze `getFails` instead?
+    catchError (void act) $ \case
+        GYApplicationException _ -> pure ()
+        e -> throwError e
     postFails <- liftClb $ getFails
     if noNewErrors preFails postFails
         then liftClb $ logError "Expected action to fail but it succeeds"
@@ -182,16 +159,11 @@ getNetworkId = do
         , gyNetworkEra = GYBabbage
         }
 
-instance MonadFail GYTxMonadClb where
-    fail = GYTxMonadClb . throwError . Left
-
 instance MonadError GYTxMonadException GYTxMonadClb where
 
-    throwError = GYTxMonadClb . throwError . Right
+    throwError = GYTxMonadClb . throwError
 
-    catchError m handler = GYTxMonadClb $ catchError (unGYTxMonadClb m) $ \case
-        Left  err -> throwError $ Left err
-        Right err -> unGYTxMonadClb $ handler err
+    catchError m handler = GYTxMonadClb . catchError (unGYTxMonadClb m) $ unGYTxMonadClb . handler
 
 instance GYTxQueryMonad GYTxMonadClb where
 
@@ -314,12 +286,29 @@ instance GYTxMonad GYTxMonadClb where
 
     randSeed = return 42
 
+
+instance GYTestMonad GYTxMonadClb where
+    runWallet w action = do
+        ma <- runWalletClb w action
+        case ma of
+            Nothing -> throwAppError $ someBackendError "Run wallet action returned Nothing"
+            Just a  -> pure a
+    sendSkeleton skeleton =
+        first
+            ( txFromApi
+            . Api.S.ShelleyTx Api.S.ShelleyBasedEraBabbage
+            . L.extractTx
+            . Clb.getOnChainTx
+            )
+        <$> sendSkeleton' skeleton []
+
+-- | Runs a `GYTxMonadClb` action using the given wallet.
+runWalletClb :: Wallet -> GYTxMonadClb a -> GYTxMonadClb (Maybe a)
+runWalletClb w action = liftClb $ flip evalRandT pureGen $ asRandClb w action
+
 -- Send skeletons with multiple signatures from wallet
 sendSkeletonWithWallets :: GYTxSkeleton v -> [Wallet] -> GYTxMonadClb GYTxId
 sendSkeletonWithWallets skeleton ws = snd <$> sendSkeleton' skeleton ws
-
-sendSkeleton :: GYTxSkeleton v -> GYTxMonadClb GYTxId
-sendSkeleton skeleton = snd <$> sendSkeleton' skeleton []
 
 sendSkeleton' :: GYTxSkeleton v -> [Wallet] -> GYTxMonadClb (OnChainTx, GYTxId)
 sendSkeleton' skeleton ws = do
@@ -337,13 +326,13 @@ sendSkeleton' skeleton ws = do
     vRes <- liftClb $ sendTx $ txToApi tx
     case vRes of
         Success _state onChainTx -> pure (onChainTx, txBodyTxId body)
-        Fail _ err -> fail $ show err
+        Fail _ err -> throwAppError . someBackendError . T.pack $ show err
 
   where
     -- Updates the wallet state.
     -- Updates extra lovelace required for fees & minimum ada requirements against the wallet sending this transaction.
     updateWalletState :: Wallet -> AlonzoCore.PParams (Api.S.ShelleyLedgerEra Api.S.BabbageEra) -> GYTxBody -> GYTxRunState -> GYTxRunState
-    updateWalletState w@Wallet {..} pp body GYTxRunState {..} = GYTxRunState $ Map.insertWith mappend walletName v walletExtraLovelace
+    updateWalletState w pp body GYTxRunState {..} = GYTxRunState $ Map.insertWith mappend (walletAddress w) v walletExtraLovelace
       where
         v = ( coerce $ txBodyFee body
             , coerce $ flip valueAssetClass GYLovelace $
@@ -392,8 +381,8 @@ skeletonToTxBody skeleton = do
     pp <- protocolParameters
     ps <- stakePools
 
-    addr        <- ownAddress
-    e <- buildTxCore ss eh pp ps GYRandomImproveMultiAsset (const id) [addr] addr Nothing (return [Identity skeleton])
+    addr <- ownAddress
+    e    <- buildTxCore ss eh pp ps GYRandomImproveMultiAsset (const id) [addr] addr Nothing [Identity skeleton]
     case e of
         Left err  -> throwAppError err
         Right res -> case res of

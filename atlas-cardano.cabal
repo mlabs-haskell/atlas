@@ -84,8 +84,8 @@ library
     GeniusYield.ReadJSON
     GeniusYield.Scripts.TestToken
     GeniusYield.Swagger.Utils
-    GeniusYield.Test.Address
     GeniusYield.Test.Clb
+    GeniusYield.Test.Clb.Utils
     GeniusYield.Test.FakeCoin
     GeniusYield.Test.Privnet.Asserts
     GeniusYield.Test.Privnet.Ctx

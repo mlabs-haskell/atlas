@@ -23,12 +23,13 @@ import           GeniusYield.Test.Privnet.Ctx
 import           GeniusYield.Test.Privnet.Examples.Gift (resolveRefScript)
 import           GeniusYield.Test.Privnet.Setup
 import           GeniusYield.TxBuilder.Class
+import GeniusYield.Test.Utils (Wallets(..))
 
 tests :: Setup -> TestTree
 tests setup = testGroup "misc"
     [ testCaseSteps "Reference script for minting policy" $ \info -> withSetup setup info $ \ctx -> do
 
-        utxoAsParam <- ctxRunC ctx (ctxUser2 ctx) $ someUTxO PlutusV1
+        utxoAsParam <- ctxRunC ctx (w2 $ ctxUsers ctx) $ someUTxO PlutusV1
         let amt    = 1
             tn     = "mintByRef"
             policy = testTokenPolicy amt tn utxoAsParam
@@ -41,18 +42,18 @@ tests setup = testGroup "misc"
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        balance <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
-        txBodyMint <- ctxRunI ctx (ctxUser2 ctx) $ do
+        txBodyMint <- ctxRunI ctx (w2 $ ctxUsers ctx) $ do
             return $
                  mustHaveInput (GYTxIn utxoAsParam GYTxInWitnessKey)
               <> mustMint (GYMintReference refScript policyAsScript) unitRedeemer tn amt
-        void $ submitTx ctx (ctxUser2 ctx) txBodyMint
+        void $ submitTx ctx (w2 $ ctxUsers ctx) txBodyMint
 
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        balance' <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance' <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         let diff = valueMinus balance' balance
 

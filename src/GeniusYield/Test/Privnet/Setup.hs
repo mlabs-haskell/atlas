@@ -47,6 +47,7 @@ import           GeniusYield.Test.Privnet.Ctx
 import           GeniusYield.Test.Privnet.Utils
 import           GeniusYield.TxBuilder
 import           GeniusYield.Types
+import GeniusYield.Test.Utils
 
 
 -------------------------------------------------------------------------------
@@ -163,22 +164,22 @@ withPrivnet testnetOpts setupUser = do
         genesisUsers <- fmap V.fromList . liftIO . forM (zip [0 :: Int ..] runtimeWallets)
             $ \(idx, PaymentKeyInfo {paymentKeyInfoPair, paymentKeyInfoAddr}) -> do
                 debug $ printf "userF = %s\n" (show idx)
-                userAddr <- addressFromBech32 <$> urlPieceFromText paymentKeyInfoAddr
-                debug $ printf "userF addr = %s\n" userAddr
-                userPaymentSKey <- readPaymentSigningKey $ paymentSKey paymentKeyInfoPair
-                debug $ printf "userF skey = %s\n" userPaymentSKey
-                pure User {userPaymentSKey, userStakeSKey=Nothing, userAddr}
+                walletAddress <- addressFromBech32 <$> urlPieceFromText paymentKeyInfoAddr
+                debug $ printf "userF addr = %s\n" walletAddress
+                walletPaymentSigningKey <- readPaymentSigningKey $ paymentSKey paymentKeyInfoPair
+                debug $ printf "userF skey = %s\n" walletPaymentSigningKey
+                pure Wallet {walletPaymentSigningKey, walletStakeSigningKey=Nothing, walletAddress}
 
         -- Generate upto 9 users.
         let extraIndices = [length genesisUsers + 1..9]
         extraUsers <- fmap V.fromList . forM extraIndices $ \idx -> do
-            User {userPaymentSKey, userAddr, userStakeSKey} <- generateUser runtimeNetworkId
+            Wallet {walletPaymentSigningKey, walletAddress, walletStakeSigningKey} <- generateUser runtimeNetworkId
             debug $ printf "user = %s\n" (show idx)
-            debug $ printf "user addr = %s\n" userAddr
-            debug $ printf "user skey = %s\n" (show userPaymentSKey)
-            debug $ printf "user vkey = %s\n" (show $ paymentVerificationKey userPaymentSKey)
-            debug $ printf "user pkh  = %s\n" (show $ paymentKeyHash $ paymentVerificationKey userPaymentSKey)
-            pure User {userPaymentSKey, userAddr, userStakeSKey}
+            debug $ printf "user addr = %s\n" walletAddress
+            debug $ printf "user skey = %s\n" (show walletPaymentSigningKey)
+            debug $ printf "user vkey = %s\n" (show $ paymentVerificationKey walletPaymentSigningKey)
+            debug $ printf "user pkh  = %s\n" (show $ paymentKeyHash $ paymentVerificationKey walletPaymentSigningKey)
+            pure Wallet {walletPaymentSigningKey, walletAddress, walletStakeSigningKey}
 
         -- Further down we need local node connection
         let info :: Api.LocalNodeConnectInfo
@@ -217,15 +218,17 @@ withPrivnet testnetOpts setupUser = do
                     -- FIXME: Some of the users which are supposed to be non genesis are actually genesis.
                     -- This is because we have multiple genesis users with cardano testnet.
                     -- Need a better (more dynamic mechanism for users).
-                    , ctxUserF            = V.head allUsers
-                    , ctxUser2            = allUsers V.! 1
-                    , ctxUser3            = allUsers V.! 2
-                    , ctxUser4            = allUsers V.! 3
-                    , ctxUser5            = allUsers V.! 4
-                    , ctxUser6            = allUsers V.! 5
-                    , ctxUser7            = allUsers V.! 6
-                    , ctxUser8            = allUsers V.! 7
-                    , ctxUser9            = allUsers V.! 8
+                    , ctxUsers            = Wallets
+                                                { w1 = V.head allUsers
+                                                , w2 = allUsers V.! 1
+                                                , w3 = allUsers V.! 2
+                                                , w4 = allUsers V.! 3
+                                                , w5 = allUsers V.! 4
+                                                , w6 = allUsers V.! 5
+                                                , w7 = allUsers V.! 6
+                                                , w8 = allUsers V.! 7
+                                                , w9 = allUsers V.! 8
+                                                }
                     , ctxGold             = GYLovelace -- temporarily
                     , ctxIron             = GYLovelace -- temporarily
                     , ctxLog              = noLogging
@@ -236,12 +239,12 @@ withPrivnet testnetOpts setupUser = do
                     }
 
             userBalances <- V.mapM
-                (\(i, User{userAddr=userIaddr}) -> do
+                (\(i, Wallet{walletAddress=userIaddr}) -> do
                     userIbalance <- ctxRunC ctx0 (ctxUserF ctx0) $ queryBalance userIaddr
                     when (isEmptyValue userIbalance) $ do
                         debug $ printf "User %s balance is empty, giving some ada\n" (show i)
                         giveAda ctx0 userIaddr
-                        when (i == 0) (giveAda ctx0 . userAddr $ ctxUserF ctx0) -- we also give ada to itself to create some small utxos
+                        when (i == 0) (giveAda ctx0 . walletAddress $ ctxUserF ctx0) -- we also give ada to itself to create some small utxos
                     ctxRunC ctx0 (ctxUserF ctx0) $ queryBalance userIaddr
                 ) $ V.zip
                     (V.fromList extraIndices)
@@ -265,7 +268,7 @@ withPrivnet testnetOpts setupUser = do
                 (\(i, userIbalance, user) -> do
                     when (isEmptyValue $ snd $ valueSplitAda userIbalance) $ do
                         debug $ printf "User%s has no tokens, giving some\n" (show i)
-                        giveTokens ctx (userAddr user)
+                        giveTokens ctx (walletAddress user)
                 )
                 $ V.zip3
                     (V.fromList extraIndices)
@@ -279,7 +282,7 @@ withPrivnet testnetOpts setupUser = do
 -- Generating users
 -------------------------------------------------------------------------------
 
-generateUser :: GYNetworkId -> IO User
+generateUser :: GYNetworkId -> IO Wallet
 generateUser network = do
     -- generate new key
     skey <- Api.generateSigningKey Api.AsPaymentKey
@@ -297,7 +300,7 @@ generateUser network = do
                 stake
             )
 
-    pure User {userPaymentSKey=paymentSigningKeyFromApi skey, userAddr=addr, userStakeSKey=Nothing}
+    pure Wallet {walletPaymentSigningKey=paymentSigningKeyFromApi skey, walletAddress=addr, walletStakeSigningKey=Nothing}
   where
     stake   = Api.NoStakeAddress
 
@@ -307,8 +310,6 @@ generateUser network = do
 
 giveAda :: Ctx -> GYAddress -> IO ()
 giveAda ctx addr = do
-    ownRefs <- gyQueryUtxosAtAddress' (ctxQueryUtxos ctx) (userAddr $ ctxUserF ctx) Nothing
-    print ownRefs
     txBody <- ctxRunI ctx (ctxUserF ctx) $ return $ mconcat $ replicate 5 $
         mustHaveOutput $ mkGYTxOutNoDatum addr (valueFromLovelace 1_000_000_000)
     void $ submitTx ctx (ctxUserF ctx) txBody

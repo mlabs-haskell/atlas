@@ -10,6 +10,7 @@ import           GeniusYield.TxBuilder
 import           GeniusYield.Types
 import           Test.Tasty                     (TestTree, testGroup)
 import           Test.Tasty.HUnit               (testCaseSteps)
+import           GeniusYield.Test.Utils
 
 simpleScriptsTests :: Setup -> TestTree
 simpleScriptsTests setup = testGroup "simple-scripts"
@@ -21,9 +22,9 @@ simpleScriptsTests setup = testGroup "simple-scripts"
 
 exerciseASimpleScript :: Ctx -> (String -> IO ()) -> Bool -> IO ()
 exerciseASimpleScript ctx info toUseRefScript = do
-  let user1 = ctxUser2 ctx
-      user2 = ctxUser3 ctx
-      user3 = ctxUser4 ctx
+  let user1 = w2 $ ctxUsers ctx
+      user2 = w3 $ ctxUsers ctx
+      user3 = w4 $ ctxUsers ctx
       (pkh1, pkh2, pkh3) = (user1, user2, user3) & each %~ userPaymentPkh
       multiSigSimpleScript = RequireAllOf [RequireSignature pkh1, RequireSignature pkh2, RequireSignature pkh3]
       multiSigSimpleScriptAddr = addressFromSimpleScript (ctxNetworkId ctx) multiSigSimpleScript
@@ -39,6 +40,6 @@ exerciseASimpleScript ctx info toUseRefScript = do
   let toConsume = txOutRefFromTuple (txIdFund, 0)
   txBodyConsume <- ctxRunI ctx fundUser $
     return $ mustHaveInput $ GYTxIn toConsume (GYTxInWitnessSimpleScript $ if toUseRefScript then GYInReferenceSimpleScript toConsume multiSigSimpleScript else GYInSimpleScript multiSigSimpleScript)
-  let txConsume = signGYTxBody txBodyConsume (map userPaymentSKey [user1, user2, user3])
+  let txConsume = signGYTxBody txBodyConsume (map walletPaymentSigningKey [user1, user2, user3])
   txIdConsume <- submitTx' ctx txConsume
   info $ "Successfully consumed the simple script, with tx id: " <> show txIdConsume

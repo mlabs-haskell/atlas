@@ -21,15 +21,16 @@ import qualified GeniusYield.Test.Privnet.Examples
 import           GeniusYield.Test.Privnet.Setup
 import qualified GeniusYield.Test.Privnet.Stake
 import qualified GeniusYield.Test.Privnet.SimpleScripts
+import GeniusYield.Test.Utils (walletsToList)
 
 main :: IO ()
 main = do
     withPrivnet cardanoDefaultTestnetOptions $ \setup ->
         defaultMain $ testGroup "atlas-privnet-tests"
           [ testCaseSteps "Balances" $ \info -> withSetup setup info $ \ctx -> do
-              forM_ (zip [(1 :: Integer) ..] (ctxUserF ctx : ctxUsers ctx))
+              forM_ (zip [(1 :: Integer) ..] . walletsToList $ ctxUsers ctx)
                 (\(i, ctxUser) -> do
-                  userIutxos <- gyQueryUtxosAtAddress (ctxProviders ctx) (userAddr ctxUser) Nothing
+                  userIutxos <- gyQueryUtxosAtAddress (ctxProviders ctx) (walletAddress ctxUser) Nothing
                   info $ unlines $
                       printf "User%s:" (if i == 1 then "F" else show i) :
                       [ printf "%s: %s" (utxoRef utxo) (utxoValue utxo)

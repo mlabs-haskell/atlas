@@ -1,4 +1,3 @@
-{-# LANGUAGE MultiWayIf      #-}
 {-# LANGUAGE PatternSynonyms #-}
 
 {-|
@@ -10,73 +9,56 @@ Stability   : develop
 
 -}
 module GeniusYield.Test.Utils
-    ( Clb.Clb
-    , mkTestFor
+    ( Wallet (..)
     , Wallets (..)
-    , runWallet
-    , runWallet'
-    , walletAddress
+    , GYTxRunState (..)
+    , GYTestMonad (..)
+    , walletsToList
     , walletPubKeyHash
-    , balance
-    , withBalance
-    , withWalletBalancesCheck
-    , withWalletBalancesCheckSimple
-    , getBalance
-    , getBalances
-    , waitUntilSlot
-    , findLockedUtxosInBody
-    , utxosInBody
-    , addRefScript
-    , addRefInput
     , fakeCoin, fakeGold, fakeIron
     , afterAllSucceed
     , feesFromLovelace
     , withMaxQCTests
+    , pureGen
+    , withWalletBalancesCheckSimple
+    , balance
+    , addRefScript
+    , addRefInput
+    , findLockedUtxosInBody
+    , utxosInBody
     , pattern (:=)
     ) where
 
-import           Control.Lens                     ((^.))
 import           Control.Monad.Random
 import           Control.Monad.State
-import           Data.List                        (findIndex)
 import qualified Data.Map.Strict                  as Map
 import           Data.Maybe                       (fromJust)
 import           Data.Semigroup                   (Sum (getSum))
 
-import qualified Data.Maybe.Strict                as StrictMaybe
-import qualified Data.Sequence.Strict             as StrictSeq
-import           Prettyprinter                    (PageWidth(AvailablePerLine), defaultLayoutOptions, layoutPageWidth,
-                                                   layoutPretty)
-import           Prettyprinter.Render.String      (renderString)
-
-import qualified Cardano.Api                      as Api
-import qualified Cardano.Api.Shelley              as Api.S
-import qualified Cardano.Ledger.Address           as L
-import qualified Cardano.Ledger.Api               as L
-import qualified Cardano.Ledger.Binary            as L
-import qualified Cardano.Ledger.Babbage.Tx        as L.B
-import qualified Cardano.Ledger.Babbage.TxOut     as L.B
-import qualified Cardano.Ledger.Shelley.API       as L.S
-import qualified Cardano.Ledger.Plutus.TxInfo     as L.Plutus
-import qualified Clb                              (Clb, ClbState (mockInfo), MockConfig, OnChainTx (getOnChainTx),
-                                                   checkErrors, defaultBabbage, initClb, intToKeyPair, ppLog, runClb,
-                                                   waitSlot)
 import qualified PlutusLedgerApi.V1.Value         as Plutus
-import qualified PlutusLedgerApi.V2               as PlutusV2
-
-import qualified Test.Cardano.Ledger.Core.KeyPair as TL
 
 import qualified Test.Tasty                       as Tasty
 import qualified Test.Tasty.QuickCheck            as Tasty
 import qualified Test.Tasty.Runners               as Tasty
-import           Test.Tasty.HUnit                 (assertFailure, testCaseInfo)
 
 import           GeniusYield.Imports
-import           GeniusYield.Test.Address
-import           GeniusYield.Test.Clb
 import           GeniusYield.Test.FakeCoin
 import           GeniusYield.TxBuilder
 import           GeniusYield.Types
+import GeniusYield.HTTP.Errors (someBackendError)
+import qualified Data.Text as T
+import qualified Cardano.Api.Shelley as Api.S
+import qualified Cardano.Ledger.Api as L
+import qualified Cardano.Ledger.Babbage as L.B
+import Data.List (findIndex)
+import Control.Lens ((^.))
+import qualified Cardano.Ledger.Babbage.TxOut as L.B
+import qualified Data.Maybe.Strict as StrictMaybe
+import qualified Cardano.Ledger.Address as L
+import qualified Cardano.Ledger.Binary as L
+import qualified Data.Sequence.Strict as StrictSeq
+import qualified Cardano.Ledger.Babbage.Tx as L.B
+import qualified PlutusLedgerApi.V2 as PlutusV2
 
 -------------------------------------------------------------------------------
 -- tasty tools
@@ -127,59 +109,23 @@ fakeGold = fromFakeCoin $ FakeCoin "Gold"
 fakeIron :: FromFakeCoin a => a
 fakeIron = fromFakeCoin $ FakeCoin "Iron"
 
--------------------------------------------------------------------------------
--- helpers
--------------------------------------------------------------------------------
+type FeesLovelace = Sum Integer
+type MinAdaLovelace = Sum Integer
 
-{- | Given a test name, runs the trace for every wallet, checking there weren't
-     errors.
--}
-mkTestFor :: String -> (Wallets -> GYTxMonadClb a) -> Tasty.TestTree
-mkTestFor name action =
-    testNoErrorsTraceClb v w Clb.defaultBabbage name $ do
-      asClb pureGen (w1 wallets) $ action wallets
-  where
-    v = valueFromLovelace 1_000_000_000_000_000 <>
-        fakeGold                  1_000_000_000 <>
-        fakeIron                  1_000_000_000
+-- Used by 'withWalletBalancesCheckSimple'
+newtype GYTxRunState = GYTxRunState { walletExtraLovelace :: Map GYAddress (FeesLovelace, MinAdaLovelace) }
 
-    w = valueFromLovelace 1_000_000_000_000 <>
-        fakeGold                  1_000_000 <>
-        fakeIron                  1_000_000
+-- | Testing Wallet representation.
+data Wallet = Wallet
+    { walletPaymentSigningKey :: !GYPaymentSigningKey
+    , walletStakeSigningKey   :: !(Maybe GYStakeSigningKey)
+    , walletAddress           :: !GYAddress
+    }
+    deriving (Show, Eq, Ord)
 
-    wallets :: Wallets
-    wallets = Wallets (mkSimpleWallet "w1" (Clb.intToKeyPair 1))
-                      (mkSimpleWallet "w2" (Clb.intToKeyPair 2))
-                      (mkSimpleWallet "w3" (Clb.intToKeyPair 3))
-                      (mkSimpleWallet "w4" (Clb.intToKeyPair 4))
-                      (mkSimpleWallet "w5" (Clb.intToKeyPair 5))
-                      (mkSimpleWallet "w6" (Clb.intToKeyPair 6))
-                      (mkSimpleWallet "w7" (Clb.intToKeyPair 7))
-                      (mkSimpleWallet "w8" (Clb.intToKeyPair 8))
-                      (mkSimpleWallet "w9" (Clb.intToKeyPair 9))
-
-    -- | Helper for building tests
-    testNoErrorsTraceClb :: GYValue -> GYValue -> Clb.MockConfig -> String -> Clb.Clb a -> Tasty.TestTree
-    testNoErrorsTraceClb funds walletFunds cfg msg act =
-        testCaseInfo msg
-            $ maybe (pure mockLog) assertFailure
-            $ mbErrors >>= \errors -> pure (mockLog <> "\n\nError :\n-------\n" <>  errors)
-        where
-            -- _errors since we decided to store errors in the log as well.
-            (mbErrors, mock) = Clb.runClb (act >> Clb.checkErrors) $ Clb.initClb cfg (valueToApi funds) (valueToApi walletFunds)
-            mockLog = "\nEmulator log :\n--------------\n" <> logString
-            options = defaultLayoutOptions { layoutPageWidth = AvailablePerLine 150 1.0}
-            logDoc = Clb.ppLog $ Clb.mockInfo mock
-            logString = renderString $ layoutPretty options logDoc
-
-
-    mkSimpleWallet :: WalletName -> TL.KeyPair r L.StandardCrypto -> Wallet
-    mkSimpleWallet n kp =
-        Wallet
-            { walletPaymentSigningKey = paymentSigningKeyFromLedgerKeyPair kp
-            , walletNetworkId         = GYTestnetPreprod
-            , walletName              = n
-            }
+-- | Gets a GYPubKeyHash of a testing wallet.
+walletPubKeyHash :: Wallet -> GYPubKeyHash
+walletPubKeyHash = fromJust . addressToPubKeyHash . walletAddress
 
 -- | Available wallets.
 data Wallets = Wallets
@@ -194,67 +140,33 @@ data Wallets = Wallets
     , w9 :: !Wallet
     } deriving (Show, Eq, Ord)
 
--- | Runs a `GYTxMonadClb` action using the given wallet.
-runWallet :: Wallet -> GYTxMonadClb a -> GYTxMonadClb (Maybe a)
-runWallet w action = liftClb $ flip evalRandT pureGen $ asRandClb w action
+walletsToList :: Wallets -> [Wallet]
+walletsToList Wallets{..} = [w1, w2, w3, w4, w5, w6, w7, w8, w9]
 
--- | Version of `runWallet` that fails if `Nothing` is returned by the action.
-runWallet' :: Wallet -> GYTxMonadClb a -> GYTxMonadClb a
-runWallet' w action = do
-    ma <- runWallet w action
-    case ma of
-        Nothing -> fail $ printf "Run wallet action returned Nothing"
-        Just a  -> return a
-
--- | Gets a GYPubKeyHash of a testing wallet.
-walletPubKeyHash :: Wallet -> GYPubKeyHash
-walletPubKeyHash = fromJust . addressToPubKeyHash . walletAddress
+class (GYTxQueryMonad m, MonadState GYTxRunState m) => GYTestMonad m where
+    runWallet :: Wallet -> m a -> m a
+    sendSkeleton :: GYTxSkeleton v -> m (GYTx, GYTxId)
 
 {- | Gets the balance from anything that `HasAddress`. The usual case will be a
      testing wallet.
--}
-balance :: (GYTxMonad m, HasAddress a, MonadFail m) => a -> m GYValue
-balance a = do
-    nid <- networkId
-    case addressFromPlutus nid $ toAddress a of
-        Left err   -> fail $ show err
-        Right addr -> do
-            utxos <- utxosAtAddress addr Nothing
-            return $ foldMapUTxOs utxoValue utxos
+    -}
+balance :: GYTxQueryMonad m => Wallet -> m GYValue
+balance w = do
+    let addr = walletAddress w
+    utxos <- utxosAtAddress addr Nothing
+    pure $ foldMapUTxOs utxoValue utxos
 
-{- | Computes a `GYTxMonadClb` action and returns the result and how this action
-     changed the balance of some "Address".
--}
-withBalance :: HasAddress a => String -> a -> GYTxMonadClb b -> GYTxMonadClb (b, GYValue)
-withBalance n a m = do
-    old <- balance a
-    b   <- m
-    new <- balance a
-    let diff = new `valueMinus` old
-    gyLogDebug' "" $ printf "%s:\nold balance: %s\nnew balance: %s\ndiff: %s" n old new diff
-    return (b, diff)
-
-{- | Computes a 'GYTxMonadClb' action, checking that the 'Wallet' balances
-        change according to the input list.
-Notes:
-* An empty list means no checks are performed.
-* The 'GYValue' should be negative to check if the Wallet lost those funds.
--}
-withWalletBalancesCheck :: [(Wallet, GYValue)] -> GYTxMonadClb a -> GYTxMonadClb a
-withWalletBalancesCheck []            m = m
-withWalletBalancesCheck ((w, v) : xs) m = do
-    (b, diff) <- withBalance (walletName w) w $ withWalletBalancesCheck xs m
-    unless (diff == v) $ do
-        fail $ printf "expected balance difference of %s for wallet %s, but the actual difference was %s" v (walletName w) diff
-    return b
-
-{- | Computes a 'GYTxMonadClb' action, checking that the 'Wallet' balances
+{- | Computes a 'GYTxQueryMonad' action, checking that the 'Wallet' balances
         change according to the input list. This is a simplified version of `withWalletBalancesCheck` where the input list need not consider lovelaces required for fees & to satisfy the min ada requirements as these are added automatically. It is therefore recommended to use this function over `withWalletBalancesCheck` to avoid hardcoding the lovelaces required for fees & min ada constraints.
 Notes:
 * An empty list means no checks are performed.
 * The 'GYValue' should be negative to check if the Wallet lost those funds.
 -}
-withWalletBalancesCheckSimple :: [(Wallet, GYValue)] -> GYTxMonadClb a -> GYTxMonadClb a
+withWalletBalancesCheckSimple
+    :: GYTestMonad m
+    => [(Wallet, GYValue)]
+    -> m a
+    -> m a
 withWalletBalancesCheckSimple wallValueDiffs m = do
   bs <- mapM (balance . fst) wallValueDiffs
   a <- m
@@ -263,28 +175,29 @@ withWalletBalancesCheckSimple wallValueDiffs m = do
 
   forM_ (zip3 wallValueDiffs bs' bs) $
     \((w, v), b', b) ->
-      let newBalance = case Map.lookup (walletName w) walletExtraLovelaceMap of
-            Nothing -> b'
-            Just (extraLovelaceForFees, extraLovelaceForMinAda) -> b' <> valueFromLovelace (getSum $ extraLovelaceForFees <> extraLovelaceForMinAda)
+      let extraLovelace = case Map.lookup (walletAddress w) walletExtraLovelaceMap of
+            Nothing -> 0
+            Just (extraLovelaceForFees, extraLovelaceForMinAda) -> getSum $ extraLovelaceForFees <> extraLovelaceForMinAda
+          newBalance = b' <> valueFromLovelace extraLovelace
           diff = newBalance `valueMinus` b
-        in unless (diff == v) $ fail $
-            printf "Wallet: %s. Old balance: %s. New balance: %s. New balance after adding extra lovelaces %s. Expected balance difference of %s, but the actual difference was %s" (walletName w) b b' newBalance v diff
+        in unless (diff == v) .
+            throwAppError . someBackendError . T.pack
+                $ printf "Wallet: %s. Old balance: %s. New balance: %s. New balance after adding extra lovelaces (%d): %s. Expected balance difference of %s, but the actual difference was %s"
+                    (walletAddress w)
+                    b
+                    b'
+                    extraLovelace
+                    newBalance
+                    v
+                    diff
   return a
 
-
--- | Given a wallet returns its balance.
-getBalance :: HasCallStack => Wallet -> GYTxMonadClb GYValue
-getBalance w = fromJust <$> runWallet w (balance w)
-
--- | Given a list of wallets returns its balances.
-getBalances :: HasCallStack => [Wallet] -> GYTxMonadClb [GYValue]
-getBalances = mapM getBalance
 
 {- | Returns the list of outputs of the transaction for the given address.
      Returns Nothing if it fails to decode an address contained in the
       transaction outputs.
 -}
-findLockedUtxosInBody :: Num a => GYAddress -> Clb.OnChainTx -> Maybe [a]
+findLockedUtxosInBody :: Num a => GYAddress -> GYTx -> Maybe [a]
 findLockedUtxosInBody addr tx =
   let
     os = getTxOutputs tx
@@ -298,65 +211,69 @@ findLockedUtxosInBody addr tx =
     findAllMatches (0, os, [])
 
 -- | Given a transaction and the corresponding transaction id, gives the list of UTxOs generated by that body /provided they still exist/. This function is usually expected to be called immediately after the transaction's submission.
-utxosInBody :: Clb.OnChainTx -> GYTxId -> GYTxMonadClb [Maybe GYUTxO]
+utxosInBody :: GYTxQueryMonad m => GYTx -> GYTxId -> m [Maybe GYUTxO]
 utxosInBody tx txId = do
     let os = getTxOutputs tx
     mapM (\i -> utxoAtTxOutRef (txOutRefFromTuple (txId, fromInteger $ toInteger i))) [0 .. (length os - 1)]
 
 
 -- | Adds the given script to the given address and returns the reference for it.
-addRefScript :: GYAddress -> GYValidator 'PlutusV2 -> GYTxMonadClb (Maybe GYTxOutRef)
+addRefScript :: GYTestMonad m => GYAddress -> GYValidator 'PlutusV2 -> m (Maybe GYTxOutRef)
 addRefScript addr script = do
     let script' = validatorToScript script
-    (tx, txId) <- sendSkeleton' (mustHaveOutput (mkGYTxOutNoDatum addr mempty) { gyTxOutRefS = Just $ GYPlutusScript script' }) []
+    (tx, txId) <- sendSkeleton
+        $ mustHaveOutput
+            (mkGYTxOutNoDatum addr mempty)
+            { gyTxOutRefS = Just $ GYPlutusScript script' }
 
     let index = findIndex
             (\o ->
-                let lsh = fmap (apiHashToPlutus . Api.ScriptHash) $ L.hashScript <$> (o ^. L.B.referenceScriptBabbageTxOutL)
+                let lsh = fmap (apiHashToPlutus . Api.S.ScriptHash) $ L.hashScript <$> (o ^. L.B.referenceScriptBabbageTxOutL)
                 in lsh == StrictMaybe.SJust (scriptPlutusHash script')
             )
             $ getTxOutputs tx
-    return $ (Just . txOutRefFromApiTxIdIx (txIdToApi txId) . wordToApiIx . fromInteger) . toInteger =<< index
+    pure $ (Just . txOutRefFromApiTxIdIx (txIdToApi txId) . wordToApiIx . fromInteger) . toInteger =<< index
 
 -- | Adds an input (whose datum we'll refer later) and returns the reference to it.
-addRefInput:: Bool       -- ^ Whether to inline this datum?
-           -> GYAddress  -- ^ Where to place this output?
-           -> GYDatum    -- ^ Our datum.
-           -> GYTxMonadClb (Maybe GYTxOutRef)
+addRefInput :: GYTestMonad m
+            => Bool       -- ^ Whether to inline this datum?
+            -> GYAddress  -- ^ Where to place this output?
+            -> GYDatum    -- ^ Our datum.
+            -> m (Maybe GYTxOutRef)
 addRefInput toInline addr dat = do
-    (tx, txId) <- sendSkeleton'
+    (tx@(txToApi -> Api.S.ShelleyTx _ ledgerTx), txId) <- sendSkeleton
         (mustHaveOutput
             $ GYTxOut addr mempty (Just (dat, if toInline then GYTxOutUseInlineDatum else GYTxOutDontUseInlineDatum)) Nothing
         )
-        []
 
-    outputsWithResolvedDatums <- mapM
-        (\o ->
-            resolveDatumFromLedger $ o ^. L.B.datumBabbageTxOutL
-        )
-        $ getTxOutputs tx
+    let L.TxDats datumMap = ledgerTx ^. L.witsTxL . L.datsTxWitsL
+        datumWits         = datumFromLedgerData <$> datumMap
+    let outputsWithResolvedDatums = map
+            (\o ->
+                resolveDatumFromLedger datumWits $ o ^. L.B.datumBabbageTxOutL
+            )
+            $ getTxOutputs tx
     let mIndex = findIndex (\d -> Just dat == d) outputsWithResolvedDatums
     pure $ (Just . txOutRefFromApiTxIdIx (txIdToApi txId) . wordToApiIx . fromInteger) . toInteger =<< mIndex
 
-resolveDatumFromLedger :: (GYTxQueryMonad m, L.Era era) => L.Datum era -> m (Maybe GYDatum)
-resolveDatumFromLedger (L.Datum d)      = pure
-                                            . Just
-                                            . datumFromPlutusData
-                                            . PlutusV2.BuiltinData
-                                            . L.getPlutusData
-                                            $ L.binaryDataToData d
-resolveDatumFromLedger (L.DatumHash dh) = lookupDatum . unsafeDatumHashFromPlutus $ L.Plutus.transDataHash dh
-resolveDatumFromLedger L.NoDatum        = pure Nothing
-
+resolveDatumFromLedger :: L.Era era => Map (L.DataHash (L.EraCrypto era)) GYDatum -> L.Datum era -> Maybe GYDatum
+resolveDatumFromLedger _ (L.Datum d) = Just
+                                        . datumFromLedgerData
+                                        $ L.binaryDataToData d
+resolveDatumFromLedger datumMap (L.DatumHash dh) = Map.lookup dh datumMap
+resolveDatumFromLedger _ L.NoDatum = Nothing
 -- TODO: Add to CLB upstream?
-getTxOutputs :: Clb.OnChainTx -> [L.B.BabbageTxOut (L.BabbageEra L.StandardCrypto)]
-getTxOutputs = fmap L.sizedValue
+getTxOutputs :: GYTx -> [L.B.BabbageTxOut (L.BabbageEra L.StandardCrypto)]
+getTxOutputs (txToApi -> Api.S.ShelleyTx _ ledgerTx) = fmap L.sizedValue
     . toList
     . StrictSeq.fromStrict
     . L.B.btbOutputs
-    . L.B.body
-    . L.S.extractTx
-    . Clb.getOnChainTx
+    $ L.B.body ledgerTx
+
+datumFromLedgerData :: L.Data era -> GYDatum
+datumFromLedgerData = datumFromPlutusData
+    . PlutusV2.BuiltinData
+    . L.getPlutusData
 
 {- | Abstraction for explicitly building a Value representing the fees of a
      transaction.
@@ -381,11 +298,3 @@ infix 0 :=
 pureGen :: StdGen
 pureGen = mkStdGen 42
 
-{- -----------------------------------------------------------------------------
-  CLB
------------------------------------------------------------------------------ -}
-
--- | Waits until a certain 'GYSlot'.
--- Silently returns if the given slot is greater than the current slot.
-waitUntilSlot :: GYSlot -> GYTxMonadClb ()
-waitUntilSlot slot = liftClb $ Clb.waitSlot $ slotToApi slot

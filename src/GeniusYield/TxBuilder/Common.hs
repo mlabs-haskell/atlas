@@ -71,10 +71,9 @@ buildTxCore
     -> [GYAddress]
     -> GYAddress
     -> Maybe GYUTxO  -- ^ Is `Nothing` if there was no 5 ada collateral returned by browser wallet.
-    -> m [f (GYTxSkeleton v)]
+    -> [f (GYTxSkeleton v)]
     -> m (Either BuildTxException (GYTxBuildResult f))
-buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change reservedCollateral action = do
-    fbodies <- action
+buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change reservedCollateral fskeletons = do
     ownUtxos <- utxosAtAddresses addrs
 
     let buildEnvWith ownUtxos' refIns collateralUtxo = GYBuildTxEnv
@@ -178,7 +177,7 @@ buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change reservedCollateral ac
                     let ownUTxos'' = foldl' (flip ownUtxoUpdateF) ownUtxos' fres
                     -- Continue with an updated accumulator (set of built results).
                     go ownUTxos'' (updateBuildRes (Right fres) acc) rest
-    go ownUtxos GYTxBuildNoInputs fbodies
+    go ownUtxos GYTxBuildNoInputs fskeletons
   where
     {- This function updates 'GYTxBuildResult' based on a build outcome
 
