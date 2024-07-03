@@ -125,41 +125,49 @@ module GeniusYield.Types.Script (
     someScriptToReferenceApi,
     someScriptFromReferenceApi,
     referenceScriptToApiPlutusScriptWitness,
+    apiHashToPlutus,
 
     -- ** File operations
     writeScript,
     readScript,
+
+    -- * Any Script
+    GYAnyScript (..),
+
+    -- * Simple Script
+    module SimpleScript
 ) where
 
+import qualified Cardano.Api                           as Api
+import qualified Cardano.Api.Shelley                   as Api.S
+import           Control.Lens                          ((?~))
+import           Data.Aeson.Types                      (FromJSONKey (fromJSONKey),
+                                                        FromJSONKeyFunction (FromJSONKeyTextParser),
+                                                        ToJSONKey (toJSONKey),
+                                                        toJSONKeyText)
+import qualified Data.Attoparsec.ByteString.Char8      as Atto
+import           Data.ByteString                       (ByteString)
+import qualified Data.ByteString.Base16                as BS16
+import           Data.ByteString.Short                 (ShortByteString)
 import           Data.GADT.Compare
 import           Data.GADT.Show
-
-import qualified Cardano.Api                      as Api
-import qualified Cardano.Api.Shelley              as Api.S
-import           Control.Lens                     ((?~))
-import           Data.Aeson.Types                 (FromJSONKey (fromJSONKey),
-                                                   FromJSONKeyFunction (FromJSONKeyTextParser),
-                                                   ToJSONKey (toJSONKey),
-                                                   toJSONKeyText)
-import qualified Data.Attoparsec.ByteString.Char8 as Atto
-import qualified Data.ByteString.Base16           as BS16
-import qualified Data.Swagger                     as Swagger
-import qualified Data.Swagger.Internal.Schema     as Swagger
-import qualified Data.Text                        as Text
-import qualified Data.Text.Encoding               as TE
-import qualified PlutusLedgerApi.Common           as Plutus
-import qualified PlutusLedgerApi.V1               as PlutusV1
-import qualified PlutusTx
-import qualified PlutusTx.Builtins                as PlutusTx
-import qualified Text.Printf                      as Printf
-import qualified Web.HttpApiData                  as Web
-
-import           Data.ByteString                  (ByteString)
-import           Data.ByteString.Short            (ShortByteString)
+import qualified Data.Swagger                          as Swagger
+import qualified Data.Swagger.Internal.Schema          as Swagger
+import qualified Data.Text                             as Text
+import qualified Data.Text.Encoding                    as TE
 import           GeniusYield.Imports
-import           GeniusYield.Types.Ledger         (PlutusToCardanoError (..))
+import           GeniusYield.Types.Ledger              (PlutusToCardanoError (..))
 import           GeniusYield.Types.PlutusVersion
-import           GeniusYield.Types.TxOutRef       (GYTxOutRef, txOutRefToApi)
+import           GeniusYield.Types.Script.ScriptHash
+import           GeniusYield.Types.Script.SimpleScript as SimpleScript
+import           GeniusYield.Types.TxOutRef            (GYTxOutRef,
+                                                        txOutRefToApi)
+import qualified PlutusLedgerApi.Common                as Plutus
+import qualified PlutusLedgerApi.V1                    as PlutusV1
+import qualified PlutusTx
+import qualified PlutusTx.Builtins                     as PlutusTx
+import qualified Text.Printf                           as Printf
+import qualified Web.HttpApiData                       as Web
 
 -- $setup
 --
@@ -270,37 +278,6 @@ validatorHashFromPlutus vh@(PlutusV1.ScriptHash ibs) =
         validatorHashFromApi
     $ Api.deserialiseFromRawBytes Api.AsScriptHash $ PlutusTx.fromBuiltin ibs
 
-newtype GYScriptHash = GYScriptHash Api.ScriptHash
-  deriving stock (Show, Eq, Ord)
-  deriving newtype (FromJSON, ToJSON)
-
--- |
---
--- >>> "cabdd19b58d4299fde05b53c2c0baf978bf9ade734b490fc0cc8b7d0" :: GYScriptHash
--- GYScriptHash "cabdd19b58d4299fde05b53c2c0baf978bf9ade734b490fc0cc8b7d0"
---
-instance IsString GYScriptHash where
-    fromString = GYScriptHash . fromString
-
--- |
---
--- >>> printf "%s" ("cabdd19b58d4299fde05b53c2c0baf978bf9ade734b490fc0cc8b7d0" :: GYScriptHash)
--- cabdd19b58d4299fde05b53c2c0baf978bf9ade734b490fc0cc8b7d0
---
-instance Printf.PrintfArg GYScriptHash where
-    formatArg (GYScriptHash h) = formatArg $ init $ tail $ show h
-
--- >>> Web.toUrlPiece (GYScriptHash "cabdd19b58d4299fde05b53c2c0baf978bf9ade734b490fc0cc8b7d0")
--- "cabdd19b58d4299fde05b53c2c0baf978bf9ade734b490fc0cc8b7d0"
---
-instance Web.ToHttpApiData GYScriptHash where
-    toUrlPiece = Api.serialiseToRawBytesHexText . scriptHashToApi
-
-scriptHashToApi :: GYScriptHash -> Api.ScriptHash
-scriptHashToApi = coerce
-
-scriptHashFromApi :: Api.ScriptHash -> GYScriptHash
-scriptHashFromApi = coerce
 
 -------------------------------------------------------------------------------
 -- Minting Policy
@@ -696,11 +673,13 @@ scriptVersion (GYScript v _ _) = v
 scriptToApi :: GYScript v -> Api.PlutusScript (PlutusVersionToApi v)
 scriptToApi (GYScript _ api _) = api
 
+-- FIXME: Should we use Conway here?
 someScriptToReferenceApi :: Some GYScript -> Api.S.ReferenceScript Api.S.BabbageEra
 someScriptToReferenceApi (Some (GYScript v apiScript _)) =
-    Api.S.ReferenceScript Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra $
-    Api.ScriptInAnyLang (Api.PlutusScriptLanguage v') $
-    Api.PlutusScript v' apiScript
+    Api.S.ReferenceScript
+      Api.S.BabbageEraOnwardsBabbage $
+      Api.ScriptInAnyLang (Api.PlutusScriptLanguage v') $
+        Api.PlutusScript v' apiScript
   where
     v' = singPlutusVersionToApi v
 
@@ -709,19 +688,41 @@ someScriptToReferenceApi (Some (GYScript v apiScript _)) =
 -- /Note/: Simple scripts are converted to 'Nothing'.
 someScriptFromReferenceApi :: Api.S.ReferenceScript era -> Maybe (Some GYScript)
 someScriptFromReferenceApi Api.S.ReferenceScriptNone = Nothing
-someScriptFromReferenceApi (Api.S.ReferenceScript Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra (Api.ScriptInAnyLang Api.SimpleScriptLanguage _)) = Nothing
-someScriptFromReferenceApi (Api.S.ReferenceScript Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra (Api.ScriptInAnyLang (Api.PlutusScriptLanguage Api.PlutusScriptV1) (Api.PlutusScript _ x))) = Just (Some y)
+someScriptFromReferenceApi
+  (Api.S.ReferenceScript Api.S.BabbageEraOnwardsBabbage
+    (Api.ScriptInAnyLang Api.SimpleScriptLanguage _)) = Nothing
+someScriptFromReferenceApi
+  (Api.S.ReferenceScript Api.S.BabbageEraOnwardsBabbage
+    (Api.ScriptInAnyLang
+      (Api.PlutusScriptLanguage Api.PlutusScriptV1)
+      (Api.PlutusScript _ x)
+    )
+  ) = Just (Some y)
   where
     y :: GYScript 'PlutusV1
     y = scriptFromApi x
 
-someScriptFromReferenceApi (Api.S.ReferenceScript Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra (Api.ScriptInAnyLang (Api.PlutusScriptLanguage Api.PlutusScriptV2) (Api.PlutusScript _ x))) = Just (Some y)
+someScriptFromReferenceApi
+  (Api.S.ReferenceScript Api.S.BabbageEraOnwardsBabbage
+    (Api.ScriptInAnyLang
+      (Api.PlutusScriptLanguage Api.PlutusScriptV2)
+      (Api.PlutusScript _ x)
+    )
+  ) = Just (Some y)
   where
     y :: GYScript 'PlutusV2
     y = scriptFromApi x
--- TODO: Following patterns should be fixed when Conway unleashes!
-someScriptFromReferenceApi (Api.S.ReferenceScript Api.S.ReferenceTxInsScriptsInlineDatumsInBabbageEra (Api.ScriptInAnyLang (Api.PlutusScriptLanguage Api.PlutusScriptV3) (Api.PlutusScript _ _))) = Nothing
-someScriptFromReferenceApi (Api.S.ReferenceScript Api.S.ReferenceTxInsScriptsInlineDatumsInConwayEra _) = Nothing
+
+-- FIXME: V3 is not possible in Babbage, shold we indicate it?
+someScriptFromReferenceApi
+  (Api.S.ReferenceScript Api.S.BabbageEraOnwardsBabbage
+    (Api.ScriptInAnyLang
+      (Api.PlutusScriptLanguage Api.PlutusScriptV3)
+      (Api.PlutusScript _ _))) = Nothing
+
+-- TODO: Add definitions for Conway
+someScriptFromReferenceApi
+  (Api.S.ReferenceScript Api.S.BabbageEraOnwardsConway _) = Nothing
 
 scriptFromApi :: forall v. SingPlutusVersionI v => Api.PlutusScript (PlutusVersionToApi v) -> GYScript v
 scriptFromApi script = GYScript v script apiHash
@@ -817,3 +818,15 @@ writeScriptCore desc file s = do
     case e of
         Left (err :: Api.FileError ()) -> throwIO $ userError $ show err
         Right ()                       -> return ()
+
+-- | Type encapsulating both simple and plutus scripts.
+data GYAnyScript where
+    GYSimpleScript :: !GYSimpleScript -> GYAnyScript
+    GYPlutusScript :: forall v. !(GYScript v) -> GYAnyScript
+
+deriving instance Show GYAnyScript
+
+instance Eq GYAnyScript where
+  GYSimpleScript s1 == GYSimpleScript s2 = s1 == s2
+  GYPlutusScript s1 == GYPlutusScript s2 = defaultEq s1 s2
+  _ == _                                 = False

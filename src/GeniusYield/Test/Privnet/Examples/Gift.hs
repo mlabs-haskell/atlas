@@ -39,31 +39,39 @@ import           GeniusYield.Test.Privnet.Setup
 import           GeniusYield.TxBuilder.Class
 import           GeniusYield.TxBuilder.Common     (collateralValue,
                                                    maximumRequiredCollateralValue)
+import Control.Monad.Reader
+import Control.Monad.State.Strict
+import GeniusYield.TxBuilder
+import GeniusYield.Test.Utils
+    ( withWalletBalancesCheckSimple,
+      GYTestMonad(sendSkeleton),
+      Wallets (..)
+      )
 
-tests :: IO Setup -> TestTree
+tests :: Setup -> TestTree
 tests setup = testGroup "gift"
     [ testCaseSteps "plutusV1" $ \info -> withSetup setup info $ \ctx -> do
         giftCleanup ctx
         let goldAC = ctxGold ctx
 
         balance1 <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2 <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2 <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
-        txBodyPlace <- ctxRunI ctx (ctxUserF ctx) $ do
-            addr <- scriptAddress giftValidatorV1
-            return $ mconcat
-                [ mustHaveOutput $ mkGYTxOut addr (valueSingleton goldAC 10) (datumFromPlutusData ())
-                ]
-        void $ submitTx ctx (ctxUserF ctx) txBodyPlace
+        runGYPrivnet ctx (ctxUserF ctx) . withWalletBalancesCheckSimple [(ctxUserF ctx, valueSingleton goldAC (-10) <> valueFromLovelace 0)] $ do
+            let addr = addressFromValidator (ctxNetworkId ctx) giftValidatorV1
+                txSkeleton = mconcat
+                    [ mustHaveOutput $ mkGYTxOut addr (valueSingleton goldAC 10) (datumFromPlutusData ())
+                    ]
+            void $ sendSkeleton txSkeleton
 
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts  @'PlutusV1 giftValidatorV1
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx'
+        grabGiftsTx' <- ctxRunF ctx (w2 $ ctxUsers ctx) $ grabGifts  @'PlutusV1 giftValidatorV1
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabGiftsTx'
 
         balance1' <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2' <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2' <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         let diff1 = valueMinus balance1' balance1
         let diff2 = valueMinus balance2' balance2
@@ -82,7 +90,7 @@ tests setup = testGroup "gift"
         let ironAC = ctxIron ctx
 
         balance1 <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2 <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2 <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         txBodyPlace <- ctxRunI ctx (ctxUserF ctx) $ do
             addr <- scriptAddress giftValidatorV2
@@ -93,11 +101,11 @@ tests setup = testGroup "gift"
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts  @'PlutusV2 giftValidatorV2
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx'
+        grabGiftsTx' <- ctxRunF ctx (w2 $ ctxUsers ctx) $ grabGifts  @'PlutusV2 giftValidatorV2
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabGiftsTx'
 
         balance1' <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2' <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2' <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         let diff1 = valueMinus balance1' balance1
         let diff2 = valueMinus balance2' balance2
@@ -115,7 +123,7 @@ tests setup = testGroup "gift"
         let ironAC = ctxIron ctx
 
         balance1 <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2 <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2 <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         txBodyPlace <- ctxRunI ctx (ctxUserF ctx) $ do
             addr <- scriptAddress giftValidatorV2
@@ -127,11 +135,11 @@ tests setup = testGroup "gift"
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts  @'PlutusV2 giftValidatorV2
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx'
+        grabGiftsTx' <- ctxRunF ctx (w2 $ ctxUsers ctx) $ grabGifts  @'PlutusV2 giftValidatorV2
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabGiftsTx'
 
         balance1' <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2' <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2' <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         let diff1 = valueMinus balance1' balance1
         let diff2 = valueMinus balance2' balance2
@@ -151,7 +159,7 @@ tests setup = testGroup "gift"
         let ironAC = ctxIron ctx
         -- `newUser` just have one UTxO which will be used as collateral.
         newUser <- newTempUserCtx ctx (ctxUserF ctx) (valueFromLovelace 200_000_000 <> valueSingleton ironAC 25) def
-        info $ printf "Newly created user's address %s" (show $ userAddr newUser)
+        info $ printf "Newly created user's address %s" (show $ walletAddress newUser)
         ----------- (ctxUserF ctx) submits some gifts
         txBodyPlace <- ctxRunI ctx (ctxUserF ctx) $ do
             addr <- scriptAddress giftValidatorV2
@@ -164,7 +172,7 @@ tests setup = testGroup "gift"
         threadDelay 1_000_000
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (walletAddress newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
 
         ---------- New user tries to grab it, since interacting with script, needs to give collateral
@@ -182,7 +190,7 @@ tests setup = testGroup "gift"
         info $ printf "Total collateral: %s" (show totalCollateral)
         assertBool "Return collateral value is zero" $  retCollValue /= mempty
         assertBool "Total collateral does not exist or value is not positive" $ totalCollateral > 0
-        assertBool "Return collateral at different address" $ retCollAddr == userAddr newUser
+        assertBool "Return collateral at different address" $ retCollAddr == walletAddress newUser
         pp <- gyGetProtocolParameters $ ctxProviders ctx
         let colls = txBodyCollateral grabGiftsTxBody'
         colls' <- ctxRunC ctx (ctxUserF ctx) $ utxosAtTxOutRefs (Set.toList colls)
@@ -196,16 +204,16 @@ tests setup = testGroup "gift"
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue (CreateUserConfig { cucGenerateCollateral = True, cucGenerateStakeKey = False })
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (walletAddress newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
         fiveAdaUtxo <- case find (\u -> utxoValue u == collateralValue) (utxosToList newUserUtxos) of
                          Nothing           -> fail "Couldn't find a 5-ada-only UTxO"
                          Just fiveAdaUtxo' -> return fiveAdaUtxo'
-        assertThrown (\case BuildTxBalancingError (BalancingErrorInsufficientFunds _) -> True; _anyOther -> False) $ ctxRunFWithCollateral ctx newUser (utxoRef fiveAdaUtxo) False $ return $ Identity $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
+        assertThrown (\case BuildTxBalancingError (BalancingErrorInsufficientFunds _) -> True; _anyOther -> False) $ ctxRunFWithCollateral ctx newUser (utxoRef fiveAdaUtxo) False $ return $ Identity $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
         -- Should be reserved if we also perform 5 ada check as it satisfies it.
-        assertThrown (\case BuildTxBalancingError (BalancingErrorInsufficientFunds _) -> True; _anyOther -> False) $ ctxRunFWithCollateral ctx newUser (utxoRef fiveAdaUtxo) True $ return $ Identity $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
+        assertThrown (\case BuildTxBalancingError (BalancingErrorInsufficientFunds _) -> True; _anyOther -> False) $ ctxRunFWithCollateral ctx newUser (utxoRef fiveAdaUtxo) True $ return $ Identity $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
         -- Would have thrown error if unable to build body.
-        void $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
+        void $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
 
     , testCaseSteps "Checking for 'BuildTxNoSuitableCollateral' error when no UTxO is greater than or equal to maximum possible total collateral" $ \info -> withSetup setup info $ \ctx -> do
         ----------- Create a new user and fund it
@@ -214,9 +222,9 @@ tests setup = testGroup "gift"
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue def
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (walletAddress newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
-        assertThrown (\case BuildTxNoSuitableCollateral -> True; _anyOther -> False) $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (valueFromLovelace 1_000_000)
+        assertThrown (\case BuildTxNoSuitableCollateral -> True; _anyOther -> False) $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (valueFromLovelace 1_000_000)
 
     , testCaseSteps "Checking for 'BuildTxNoSuitableCollateral' error when UTxO is greater than or equal to maximum possible total collateral but resulting return collateral doesn't satisfy minimum ada requirement" $ \info -> withSetup setup info $ \ctx -> do
         pp <- gyGetProtocolParameters (ctxProviders ctx)
@@ -225,9 +233,9 @@ tests setup = testGroup "gift"
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue def
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (walletAddress newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
-        assertThrown (\case BuildTxNoSuitableCollateral -> True; _anyOther -> False) $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (valueFromLovelace 1_000_000)
+        assertThrown (\case BuildTxNoSuitableCollateral -> True; _anyOther -> False) $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (valueFromLovelace 1_000_000)
 
     , testCaseSteps "No 'BuildTxNoSuitableCollateral' error is thrown when collateral input is sufficient" $ \info -> withSetup setup info $ \ctx -> do
         pp <- gyGetProtocolParameters (ctxProviders ctx)
@@ -236,39 +244,39 @@ tests setup = testGroup "gift"
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue def
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (walletAddress newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
-        void $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (valueFromLovelace 1_000_000)
+        void $ ctxRunI ctx newUser $ return $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (valueFromLovelace 1_000_000)
 
     , testCaseSteps "Checking if collateral is reserved in case we want it even if it's value is not 5 ada" $ \info -> withSetup setup info $ \ctx -> do
         ----------- Create a new user and fund it
         newUser <- newTempUserCtx ctx (ctxUserF ctx) (valueFromLovelace 40_000_000) def
         -- Add another UTxO to be used as collateral.
-        txBody <- ctxRunI ctx (ctxUserF ctx) $ return $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (valueFromLovelace 8_000_000)
+        txBody <- ctxRunI ctx (ctxUserF ctx) $ return $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (valueFromLovelace 8_000_000)
         void $ submitTx ctx (ctxUserF ctx) txBody
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (walletAddress newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
         eightAdaUtxo <- case find (\u -> utxoValue u == valueFromLovelace 8_000_000) (utxosToList newUserUtxos) of
                           Nothing -> fail "Couldn't find a 8-ada-only UTxO"
                           Just u  -> return u
         let newUserValue = foldlUTxOs' (\a u -> a <> utxoValue u) mempty newUserUtxos
-        assertThrown (\case BuildTxBalancingError (BalancingErrorInsufficientFunds _) -> True; _anyOther -> False) $ ctxRunFWithCollateral ctx newUser (utxoRef eightAdaUtxo) False $ return $ Identity $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
+        assertThrown (\case BuildTxBalancingError (BalancingErrorInsufficientFunds _) -> True; _anyOther -> False) $ ctxRunFWithCollateral ctx newUser (utxoRef eightAdaUtxo) False $ return $ Identity $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
         -- eight ada utxo won't satisfy 5 ada check and thus would be ignored
-        void $ ctxRunFWithCollateral ctx newUser (utxoRef eightAdaUtxo) True $ return $ Identity $ mustHaveOutput $ mkGYTxOutNoDatum (userAddr newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
+        void $ ctxRunFWithCollateral ctx newUser (utxoRef eightAdaUtxo) True $ return $ Identity $ mustHaveOutput $ mkGYTxOutNoDatum (walletAddress newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000)
 
     , testCaseSteps "Testing signature from stake key" $ \info -> withSetup setup info $ \ctx -> do
         ----------- Create a new user and fund it
         let newUserValue = valueFromLovelace 200_000_000 <> valueSingleton (ctxIron ctx) 25
-            submitWithoutStakeKey User {..} txBody = do
-              let tx = signGYTxBody' txBody [GYSomeSigningKey userPaymentSKey]
+            submitWithoutStakeKey Wallet {..} txBody = do
+              let tx = signGYTxBody' txBody [GYSomeSigningKey walletPaymentSigningKey]
               nodeSubmitTx (ctxInfo ctx) tx
         newUser <- newTempUserCtx ctx (ctxUserF ctx) newUserValue (CreateUserConfig { cucGenerateCollateral = True, cucGenerateStakeKey = True })
 
         info $ printf "UTxOs at this new user"
-        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (userAddr newUser) Nothing
+        newUserUtxos <- ctxRunC ctx newUser $ utxosAtAddress (walletAddress newUser) Nothing
         forUTxOs_ newUserUtxos (info . show)
-        txBody <- ctxRunI ctx newUser $ return $ mustBeSignedBy (userStakePkh newUser & fromJust) <> mustHaveOutput (mkGYTxOutNoDatum (userAddr newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000))
+        txBody <- ctxRunI ctx newUser $ return $ mustBeSignedBy (userStakePkh newUser & fromJust) <> mustHaveOutput (mkGYTxOutNoDatum (walletAddress newUser) (newUserValue `valueMinus` valueFromLovelace 3_000_000))
         -- When signed without required stake key, should give a submit exception.
         catch (void (submitWithoutStakeKey newUser txBody)) (\(_ :: SubmitTxException) -> pure ())
         -- Signing should go smoothly.
@@ -297,7 +305,7 @@ tests setup = testGroup "gift"
         let ironAC = ctxIron ctx
 
         balance1 <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2 <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2 <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         -- in this test we create an output with reference script
 
@@ -321,12 +329,12 @@ tests setup = testGroup "gift"
 
         -- NOTE: TxValidationErrorInMode (ShelleyTxValidationError ShelleyBasedEraBabbage (ApplyTxError [UtxowFailure (FromAlonzoUtxowFail (WrappedShelleyEraFailure (ExtraneousScriptWitnessesUTXOW
         -- Apparently we MUST NOT include the script if there is a utxo input with that script. Even if we consume that utxo.
-        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGiftsRef ref giftValidatorV2
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx'
+        grabGiftsTx' <- ctxRunF ctx (w2 $ ctxUsers ctx) $ grabGiftsRef ref giftValidatorV2
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabGiftsTx'
 
         -- Check final balance
         balance1' <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2' <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2' <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         let diff1 = valueMinus balance1' balance1
         let diff2 = valueMinus balance2' balance2
@@ -346,7 +354,7 @@ tests setup = testGroup "gift"
         let ironAC = ctxIron ctx
 
         balance1 <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2 <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2 <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         -- in this test we create an output with reference script
 
@@ -370,17 +378,17 @@ tests setup = testGroup "gift"
 
         -- NOTE: TxValidationErrorInMode (ShelleyTxValidationError ShelleyBasedEraBabbage (ApplyTxError [UtxowFailure (FromAlonzoUtxowFail (WrappedShelleyEraFailure (ExtraneousScriptWitnessesUTXOW
         -- Apparently we MUST NOT include the script if there is a utxo input with that script. Even if we consume that utxo.
-        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ do
+        grabGiftsTx' <- ctxRunF ctx (w2 $ ctxUsers ctx) $ do
             -- We spend the gifts and give the transaction (unused) reference input
             -- we need to use 'PlutusV2 here.
             s1 <- grabGifts  @'PlutusV2 giftValidatorV2
             return (s1 <|> Just (mustHaveRefInput ref))
 
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx'
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabGiftsTx'
 
         -- Check final balance
         balance1' <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2' <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2' <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         let diff1 = valueMinus balance1' balance1
         let diff2 = valueMinus balance2' balance2
@@ -430,7 +438,7 @@ tests setup = testGroup "gift"
 
         -- Try to consume V1 and V2 gifts in the same transaction
         {- Doesn't compile.
-        assertThrown isTxBodyErrorAutoBalance $ ctxRunF ctx (ctxUser2 ctx) $ do
+        assertThrown isTxBodyErrorAutoBalance $ ctxRunF ctx (w2 $ ctxUsers ctx) $ do
             sV2 <- grabGiftsRef ref giftValidatorV2
             sV1 <- grabGifts giftValidatorV1
             return (liftA2 (<>) sV2 sV1)
@@ -467,7 +475,7 @@ tests setup = testGroup "gift"
 
         -- this doesnt' work. Mixing V1 scripts with V2 features
         {- Doesn't compile.
-        assertThrown isTxBodyErrorAutoBalance $ ctxRunF ctx (ctxUser2 ctx) $ grabGifts giftValidatorV1 >>= traverse addNewGiftV2
+        assertThrown isTxBodyErrorAutoBalance $ ctxRunF ctx (w2 $ ctxUsers ctx) $ grabGifts giftValidatorV1 >>= traverse addNewGiftV2
         -}
 
         -- wait a tiny bit.
@@ -506,8 +514,8 @@ tests setup = testGroup "gift"
                     , gyTxOutRefS    = Nothing
                     }
 
-        grabGiftsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts giftValidatorV2 >>= traverse addNewGiftV2
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx'
+        grabGiftsTx' <- ctxRunF ctx (w2 $ ctxUsers ctx) $ grabGifts giftValidatorV2 >>= traverse addNewGiftV2
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabGiftsTx'
 
     , testCaseSteps "inlinedatum-v1v2" $ \info -> withSetup setup info $ \ctx -> do
         -- in this test we try to consume v1 and v2 script outputs in the same transaction.
@@ -532,12 +540,12 @@ tests setup = testGroup "gift"
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        grabGiftsTx <- ctxRunF ctx (ctxUser2 ctx) $ do
+        grabGiftsTx <- ctxRunF ctx (w2 $ ctxUsers ctx) $ do
           s1 <- grabGifts  @'PlutusV1 giftValidatorV1
           s2 <- grabGifts treatValidatorV2
           return (s1 <|> s2)
 
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabGiftsTx
 
     , testCaseSteps "inlinedatum-in-v1" $ \info -> withSetup setup info $ \_ctx -> do
         -- in this test we try to consume v1 script output which has inline datums
@@ -558,11 +566,11 @@ tests setup = testGroup "gift"
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        assertThrown isTxBodyErrorAutoBalance $ ctxRunF ctx (ctxUser2 ctx) $ grabGifts giftValidatorV1
+        assertThrown isTxBodyErrorAutoBalance $ ctxRunF ctx (w2 $ ctxUsers ctx) $ grabGifts giftValidatorV1
 
-        grabGiftsTx <- ctxRunF ctx (ctxUser2 ctx) $ grabGifts giftValidatorV1
+        grabGiftsTx <- ctxRunF ctx (w2 $ ctxUsers ctx) $ grabGifts giftValidatorV1
 
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabGiftsTx
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabGiftsTx
         -}
     ]
 

@@ -9,6 +9,7 @@ Stability   : develop
 module GeniusYield.TxBuilder.Node (
     GYTxMonadNode,
     GYTxBuildResult(..),
+    evalGYTxMonadNode,
     runGYTxMonadNode,
     runGYTxMonadNodeWithStrategy,
     runGYTxMonadNodeC,
@@ -21,6 +22,8 @@ module GeniusYield.TxBuilder.Node (
 ) where
 
 import qualified Cardano.Api                     as Api
+-- import qualified Cardano.Api.Shelley             as Api.S
+
 import           Control.Monad.IO.Class          (MonadIO (..))
 import qualified Data.ByteString                 as BS
 import qualified Data.List.NonEmpty              as NE
@@ -336,16 +339,22 @@ runGYTxMonadNodeCore ownUtxoUpdateF cstrat nid providers addrs change collateral
     -- Obtain constant parameters to be used across several 'GYTxBody' generations.
     ss          <- gyGetSystemStart providers
     eh          <- gyGetEraHistory providers
-    pp          <- gyGetProtocolParameters providers
+    apiPp       <- gyGetProtocolParameters providers
     ps          <- gyGetStakePools providers
 
-    bpp <- case Api.bundleProtocolParams Api.BabbageEra pp of
-                Left e     -> throwIO $ BuildTxPPConversionError e
-                Right bpp' -> pure bpp'
+    -- bpp <- case Api.bundleProtocolParams Api.BabbageEra pp of
+    --             Left e     -> throwIO $ BuildTxPPConversionError e
+    --             Right bpp' -> pure bpp'
+
+    pp <- case Api.toLedgerPParams Api.ShelleyBasedEraBabbage apiPp of
+                Left e   -> throwIO $ BuildTxPPConversionError e
+                Right pp -> pure pp
 
     collateral' <- obtainCollateral
 
-    e <- unGYTxMonadNode (buildTxCore ss eh bpp ps cstrat ownUtxoUpdateF addrs change collateral' loggedAction) GYTxNodeEnv
+    fskeletons <- evalGYTxMonadNode nid providers addrs change collateral' loggedAction
+
+    e <- unGYTxMonadNode (buildTxCore ss eh pp ps cstrat ownUtxoUpdateF addrs change collateral' fskeletons) GYTxNodeEnv
             { envNid           = nid
             , envProviders     = providers
             , envAddrs         = addrs
@@ -371,6 +380,29 @@ runGYTxMonadNodeCore ownUtxoUpdateF cstrat nid providers addrs change collateral
 
       logSkeletons :: [f (GYTxSkeleton v)] -> GYTxMonadNode ()
       logSkeletons = mapM_ (mapM_ (logMsg "runGYTxMonadNodeCore" GYDebug . show))
+
+{- | Evaluate a 'GYTxMonadNode' action using necessary details.
+
+The evaluation result of this function will *only* be consistent with 'runGYTxMonadNode*' family of
+functions _if and only if_ the arguments are *equivalent*.
+-}
+evalGYTxMonadNode
+    :: GYNetworkId
+    -> GYProviders
+    -> [GYAddress]       -- ^ Addresses belonging to wallet.
+    -> GYAddress         -- ^ Change address.
+    -> Maybe GYUTxO      -- ^ Collateral (optional). Framework will choose one if not provided.
+    -> GYTxMonadNode a   -- ^ The action to evaluate.
+    -> IO a
+evalGYTxMonadNode nid providers addrs change collateral m = do
+    unGYTxMonadNode m GYTxNodeEnv
+        { envNid           = nid
+        , envProviders     = providers
+        , envAddrs         = addrs
+        ,_envChangeAddr    = change
+        , envCollateral    = collateral
+        , envUsedSomeUTxOs = mempty
+        }
 
 -- | Update own utxo set by removing any utxos used up in the given tx.
 updateOwnUtxosParallel :: GYTxBody -> GYUTxOs -> GYUTxOs

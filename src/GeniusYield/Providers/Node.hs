@@ -13,9 +13,6 @@ module GeniusYield.Providers.Node
     , nodeGetParameters
     -- * Low-level
     , nodeGetSlotOfCurrentBlock
-    , nodeUtxosAtAddress
-    , nodeUtxoAtTxOutRef
-    , nodeUtxosAtTxOutRefs
     , nodeStakeAddressInfo
     -- * Auxiliary
     , networkIdToLocalNodeConnectInfo
@@ -38,10 +35,10 @@ import           Ouroboros.Network.Protocol.LocalTxSubmission.Type (SubmitResult
 -- Submit
 -------------------------------------------------------------------------------
 
-nodeSubmitTx :: Api.LocalNodeConnectInfo Api.CardanoMode -> GYSubmitTx
+nodeSubmitTx :: Api.LocalNodeConnectInfo -> GYSubmitTx
 nodeSubmitTx info tx = do
     -- We may submit transaction in older eras as well, it seems.
-    res <- Api.submitTxToNodeLocal info $ Api.TxInMode (txToApi tx) Api.BabbageEraInCardanoMode
+    res <- Api.submitTxToNodeLocal info $ Api.TxInMode Api.ShelleyBasedEraBabbage (txToApi tx)
     case res of
         SubmitSuccess  -> return $ txIdFromApi $ Api.getTxId $ Api.getTxBody $ txToApi tx
         SubmitFail err -> throwIO $ SubmitTxException $ Txt.pack $ show err
@@ -50,12 +47,12 @@ nodeSubmitTx info tx = do
 -- Current slot
 -------------------------------------------------------------------------------
 
-nodeGetSlotOfCurrentBlock :: Api.LocalNodeConnectInfo Api.CardanoMode -> IO GYSlot
+nodeGetSlotOfCurrentBlock :: Api.LocalNodeConnectInfo -> IO GYSlot
 nodeGetSlotOfCurrentBlock info = do
     Api.ChainTip s _ _ <- Api.getLocalChainTip info
     return $ slotFromApi s
 
-nodeSlotActions :: Api.LocalNodeConnectInfo Api.CardanoMode -> GYSlotActions
+nodeSlotActions :: Api.LocalNodeConnectInfo -> GYSlotActions
 nodeSlotActions info = GYSlotActions
     { gyGetSlotOfCurrentBlock' = getSlotOfCurrentBlock
     , gyWaitForNextBlock'      = gyWaitForNextBlockDefault getSlotOfCurrentBlock
@@ -65,27 +62,10 @@ nodeSlotActions info = GYSlotActions
     getSlotOfCurrentBlock = nodeGetSlotOfCurrentBlock info
 
 -------------------------------------------------------------------------------
--- UTxO query
--------------------------------------------------------------------------------
-
-nodeUtxosAtAddress :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> GYAddress -> IO GYUTxOs
-nodeUtxosAtAddress era info addr = queryUTxO era info $ Api.QueryUTxOByAddress $ Set.singleton $ addressToApi addr
-
-nodeUtxoAtTxOutRef :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> GYTxOutRef -> IO (Maybe GYUTxO)
-nodeUtxoAtTxOutRef era info ins = do
-    utxos <- queryUTxO era info $ Api.QueryUTxOByTxIn $ Set.singleton $ txOutRefToApi ins
-    case utxosToList utxos of
-        [x] | utxoRef x == ins -> return (Just x)
-        _                      -> return Nothing -- we return Nothing also in "should never happen" cases.
-
-nodeUtxosAtTxOutRefs :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> [GYTxOutRef] -> IO GYUTxOs
-nodeUtxosAtTxOutRefs era info ins = queryUTxO era info $ Api.QueryUTxOByTxIn $ Set.fromList $ txOutRefToApi <$> ins
-
--------------------------------------------------------------------------------
 -- Parameters
 -------------------------------------------------------------------------------
 
-nodeGetParameters :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> GYGetParameters
+nodeGetParameters :: GYEra -> Api.LocalNodeConnectInfo -> GYGetParameters
 nodeGetParameters era info = GYGetParameters
     { gyGetProtocolParameters' = nodeGetProtocolParameters era info
     , gyGetStakePools'         = stakePools era info
@@ -97,15 +77,16 @@ nodeGetParameters era info = GYGetParameters
                                     =<< (makeSlotConfig <$> systemStart info <*> eraHistory info)
     }
 
-nodeGetProtocolParameters :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> IO Api.S.ProtocolParameters
-nodeGetProtocolParameters GYAlonzo  info = queryAlonzoEra  info Api.QueryProtocolParameters
-nodeGetProtocolParameters GYBabbage info = queryBabbageEra info Api.QueryProtocolParameters
+nodeGetProtocolParameters :: GYEra -> Api.LocalNodeConnectInfo -> IO Api.S.ProtocolParameters
+nodeGetProtocolParameters GYAlonzo  info = Api.fromLedgerPParams Api.ShelleyBasedEraAlonzo <$> queryAlonzoEra info Api.QueryProtocolParameters
+nodeGetProtocolParameters GYBabbage info = Api.fromLedgerPParams Api.ShelleyBasedEraBabbage <$> queryBabbageEra info Api.QueryProtocolParameters
+-- FIXME: add Conway
 
-stakePools :: GYEra -> Api.LocalNodeConnectInfo Api.CardanoMode -> IO (Set.Set Api.S.PoolId)
+stakePools :: GYEra -> Api.LocalNodeConnectInfo -> IO (Set.Set Api.S.PoolId)
 stakePools GYAlonzo  info = queryAlonzoEra  info Api.QueryStakePools
 stakePools GYBabbage info = queryBabbageEra info Api.QueryStakePools
 
-nodeStakeAddressInfo :: Api.LocalNodeConnectInfo Api.CardanoMode -> GYStakeAddress -> IO (Maybe GYStakeAddressInfo)
+nodeStakeAddressInfo :: Api.LocalNodeConnectInfo -> GYStakeAddress -> IO (Maybe GYStakeAddressInfo)
 nodeStakeAddressInfo info saddr = resolveStakeAddressInfoFromApi saddr <$> queryBabbageEra info (Api.QueryStakeAddresses (Set.singleton $ stakeCredentialToApi $ stakeAddressToCredential saddr) (Api.localNodeNetworkId info))
 
 resolveStakeAddressInfoFromApi :: GYStakeAddress -> (Map.Map Api.StakeAddress Api.Lovelace, Map.Map Api.StakeAddress Api.S.PoolId) -> Maybe GYStakeAddressInfo
@@ -117,11 +98,11 @@ resolveStakeAddressInfoFromApi (stakeAddressToApi -> stakeAddr) (rewards, delega
         }
     else Nothing
 
-systemStart :: Api.LocalNodeConnectInfo Api.CardanoMode -> IO SystemStart
+systemStart :: Api.LocalNodeConnectInfo -> IO SystemStart
 systemStart info = queryCardanoMode info Api.QuerySystemStart
 
-eraHistory :: Api.LocalNodeConnectInfo Api.CardanoMode -> IO (Api.EraHistory Api.CardanoMode)
-eraHistory info = queryCardanoMode info $ Api.QueryEraHistory Api.CardanoModeIsMultiEra
+eraHistory :: Api.LocalNodeConnectInfo -> IO Api.EraHistory
+eraHistory info = queryCardanoMode info $ Api.QueryEraHistory
 
 -------------------------------------------------------------------------------
 -- Auxiliary functions
@@ -131,7 +112,7 @@ eraHistory info = queryCardanoMode info $ Api.QueryEraHistory Api.CardanoModeIsM
 --
 networkIdToLocalNodeConnectInfo :: GYNetworkId                              -- ^ The network identifier.
                                 -> FilePath                                 -- ^ Path to the local node socket.
-                                -> Api.LocalNodeConnectInfo Api.CardanoMode
+                                -> Api.LocalNodeConnectInfo
 networkIdToLocalNodeConnectInfo nid nodeSocket = Api.LocalNodeConnectInfo
     { localConsensusModeParams = Api.CardanoModeParams $ networkIdToEpochSlots nid
     , localNodeNetworkId       = networkIdToApi nid

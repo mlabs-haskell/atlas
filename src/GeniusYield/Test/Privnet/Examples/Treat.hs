@@ -20,8 +20,9 @@ import           GeniusYield.Test.Privnet.Asserts
 import           GeniusYield.Test.Privnet.Ctx
 import           GeniusYield.Test.Privnet.Setup
 import           GeniusYield.TxBuilder.Class
+import GeniusYield.Test.Utils (Wallets(..))
 
-tests :: IO Setup -> TestTree
+tests :: Setup -> TestTree
 tests setup = testGroup "treat"
     [ testCaseSteps "plutusV1" $ \info -> withSetup setup info $ \ctx -> do
         let goldAC = ctxGold ctx
@@ -37,7 +38,7 @@ tests setup = testGroup "treat"
 
         -- this fails as we tell that script is 'PlutusV1,
         -- but it uses V2 features.
-        assertThrown isTxBodyErrorAutoBalance $ ctxRunF ctx (ctxUser2 ctx) $ grabTreats  @'PlutusV1 treatValidatorV1
+        assertThrown isTxBodyErrorAutoBalance $ ctxRunF ctx (w2 $ ctxUsers ctx) $ grabTreats  @'PlutusV1 treatValidatorV1
 
     -- this is the same tests as for Gift 'PlutusV2.
     , testCaseSteps "plutusV2" $ \info -> withSetup setup info $ \ctx -> do
@@ -50,7 +51,7 @@ tests setup = testGroup "treat"
         threadDelay 1_000_000
 
         balance1 <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2 <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2 <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         txBodyPlace <- ctxRunI ctx (ctxUserF ctx) $ do
             addr <- scriptAddress treatValidatorV2
@@ -61,14 +62,14 @@ tests setup = testGroup "treat"
         -- wait a tiny bit.
         threadDelay 1_000_000
 
-        grabTreatsTx' <- ctxRunF ctx (ctxUser2 ctx) $ grabTreats  @'PlutusV2 treatValidatorV2
-        mapM_ (submitTx ctx (ctxUser2 ctx)) grabTreatsTx'
+        grabTreatsTx' <- ctxRunF ctx (w2 $ ctxUsers ctx) $ grabTreats  @'PlutusV2 treatValidatorV2
+        mapM_ (submitTx ctx (w2 $ ctxUsers ctx)) grabTreatsTx'
 
         -- wait a tiny bit.
         threadDelay 1_000_000
 
         balance1' <- ctxQueryBalance ctx (ctxUserF ctx)
-        balance2' <- ctxQueryBalance ctx (ctxUser2 ctx)
+        balance2' <- ctxQueryBalance ctx (w2 $ ctxUsers ctx)
 
         let diff1 = valueMinus balance1' balance1
         let diff2 = valueMinus balance2' balance2

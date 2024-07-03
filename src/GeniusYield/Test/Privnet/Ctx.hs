@@ -9,10 +9,16 @@ Stability   : develop
 module GeniusYield.Test.Privnet.Ctx (
     -- * Context
     Ctx (..),
-    -- * User
-    User (..),
+    ctxNetworkId,
+    -- * Wallet
+    Wallet (..),
     CreateUserConfig (..),
-    ctxUsers,
+
+    GYTxRunState (..),
+
+    GYPrivnetMonad,
+    runGYPrivnet,
+
     userPkh,
     userPaymentPkh,
     userStakePkh,
@@ -20,6 +26,7 @@ module GeniusYield.Test.Privnet.Ctx (
     userPaymentVKey,
     userStakeVKey,
     -- * Operations
+    ctxEval,
     ctxRunI,
     ctxRunIWithStrategy,
     ctxRunC,
@@ -40,11 +47,13 @@ module GeniusYield.Test.Privnet.Ctx (
     findOutput,
     addRefScriptCtx,
     addRefInputCtx,
+    ctxUserF,
 ) where
 
 import qualified Cardano.Api                as Api
 import           Data.Default               (Default (..))
 import qualified Data.Map.Strict            as Map
+import           Data.Monoid                (Sum (Sum))
 import qualified Data.Set                   as Set
 import qualified GeniusYield.Examples.Limbo as Limbo
 import           GeniusYield.Imports
@@ -53,6 +62,13 @@ import           GeniusYield.Transaction
 import           GeniusYield.TxBuilder
 import           GeniusYield.Types
 import           Test.Tasty.HUnit           (assertFailure)
+import qualified Cardano.Ledger.Alonzo.Core as AlonzoCore
+import qualified Cardano.Api.Shelley as Api.S
+import Data.Foldable (foldMap')
+import GeniusYield.Transaction.Common (adjustTxOut, minimumUTxO)
+import GeniusYield.Test.Utils
+import Control.Monad.Reader
+import Control.Monad.State.Strict
 
 data CreateUserConfig =
      CreateUserConfig
@@ -65,62 +81,53 @@ data CreateUserConfig =
 instance Default CreateUserConfig where
    def = CreateUserConfig { cucGenerateCollateral = False, cucGenerateStakeKey = False }
 
-data User = User
-    { userPaymentSKey :: !GYPaymentSigningKey
-    , userStakeSKey   :: !(Maybe GYStakeSigningKey)
-    , userAddr        :: !GYAddress
-    }
-
 {-# DEPRECATED userVKey "Use userPaymentVKey." #-}
-userVKey :: User -> GYPaymentVerificationKey
-userVKey = paymentVerificationKey . userPaymentSKey
+userVKey :: Wallet -> GYPaymentVerificationKey
+userVKey = paymentVerificationKey . walletPaymentSigningKey
 
-userPaymentVKey :: User -> GYPaymentVerificationKey
+userPaymentVKey :: Wallet -> GYPaymentVerificationKey
 userPaymentVKey = userVKey
 
-userStakeVKey :: User -> Maybe GYStakeVerificationKey
-userStakeVKey = fmap stakeVerificationKey . userStakeSKey
+userStakeVKey :: Wallet -> Maybe GYStakeVerificationKey
+userStakeVKey = fmap stakeVerificationKey . walletStakeSigningKey
 
-userPkh :: User -> GYPubKeyHash
-userPkh = toPubKeyHash . paymentKeyHash . paymentVerificationKey . userPaymentSKey
+userPkh :: Wallet -> GYPubKeyHash
+userPkh = toPubKeyHash . paymentKeyHash . paymentVerificationKey . walletPaymentSigningKey
 
-userPaymentPkh :: User -> GYPaymentKeyHash
-userPaymentPkh = paymentKeyHash . paymentVerificationKey . userPaymentSKey
+userPaymentPkh :: Wallet -> GYPaymentKeyHash
+userPaymentPkh = paymentKeyHash . paymentVerificationKey . walletPaymentSigningKey
 
-userStakePkh :: User -> Maybe GYStakeKeyHash
-userStakePkh = fmap (stakeKeyHash . stakeVerificationKey) . userStakeSKey
+userStakePkh :: Wallet -> Maybe GYStakeKeyHash
+userStakePkh = fmap (stakeKeyHash . stakeVerificationKey) . walletStakeSigningKey
 
 data Ctx = Ctx
-    { ctxEra              :: !GYEra
-    , ctxInfo             :: !(Api.LocalNodeConnectInfo Api.CardanoMode)
-    , ctxUserF            :: !User  -- ^ Funder. All other users begin with same status of funds.
-    , ctxUser2            :: !User
-    , ctxUser3            :: !User
-    , ctxUser4            :: !User
-    , ctxUser5            :: !User
-    , ctxUser6            :: !User
-    , ctxUser7            :: !User
-    , ctxUser8            :: !User
-    , ctxUser9            :: !User
-    , ctxGold             :: !GYAssetClass  -- ^ asset used in tests
-    , ctxIron             :: !GYAssetClass  -- ^ asset used in tests
-    , ctxLog              :: !GYLog
-    , ctxLookupDatum      :: !GYLookupDatum
-    , ctxAwaitTxConfirmed :: !GYAwaitTx
-    , ctxQueryUtxos       :: !GYQueryUTxO
-    , ctxGetParams        :: !GYGetParameters
+    { ctxNetworkInfo       :: !GYNetworkInfo
+    , ctxInfo              :: !Api.LocalNodeConnectInfo
+    -- FIXME: There are now multiple genesis users (since cardano-testnet usage).
+    , ctxUsers             :: Wallets
+    , ctxGold              :: !GYAssetClass  -- ^ asset used in tests
+    , ctxIron              :: !GYAssetClass  -- ^ asset used in tests
+    , ctxLog               :: !GYLog
+    , ctxLookupDatum       :: !GYLookupDatum
+    , ctxAwaitTxConfirmed  :: !GYAwaitTx
+    , ctxQueryUtxos        :: !GYQueryUTxO
+    , ctxGetParams         :: !GYGetParameters
     }
 
--- | List of context sibling users - all of which begin with same balance.
-ctxUsers :: Ctx -> [User]
-ctxUsers ctx = ($ ctx) <$> [ctxUser2, ctxUser3, ctxUser4, ctxUser5, ctxUser6, ctxUser7, ctxUser8, ctxUser9]
+-- | Obtain the funding/genesis user.
+-- Note: The first wallet is guaranteed to be a genesis user, but there may be more genesis users.
+ctxUserF :: Ctx -> Wallet
+ctxUserF = w1 . ctxUsers
+
+ctxNetworkId :: Ctx -> GYNetworkId
+ctxNetworkId Ctx {ctxNetworkInfo} = GYPrivnet ctxNetworkInfo
 
 -- | Creates a new user with the given balance. Note that the actual balance which this user get's could be more than what is provided to satisfy minimum ada requirement of a UTxO.
 newTempUserCtx:: Ctx
-              -> User            -- ^ User which will fund this new user.
+              -> Wallet          -- ^ Wallet which will fund this new user.
               -> GYValue         -- ^ Describes balance of new user.
               -> CreateUserConfig
-              -> IO User
+              -> IO Wallet
 newTempUserCtx ctx fundUser fundValue CreateUserConfig {..} = do
   newPaymentSKey <- generatePaymentSigningKey
   newStakeSKey <- if cucGenerateStakeKey then Just <$> generateStakeSigningKey else pure Nothing
@@ -128,7 +135,7 @@ newTempUserCtx ctx fundUser fundValue CreateUserConfig {..} = do
       newStakeVKey = stakeVerificationKey <$> newStakeSKey
       newPaymentKeyHash = paymentKeyHash newPaymentVKey
       newStakeKeyHash = stakeKeyHash <$> newStakeVKey
-      newAddr = addressFromCredential GYPrivnet (GYPaymentCredentialByKey newPaymentKeyHash) (GYStakeCredentialByKey <$> newStakeKeyHash)
+      newAddr = addressFromCredential (ctxNetworkId ctx) (GYPaymentCredentialByKey newPaymentKeyHash) (GYStakeCredentialByKey <$> newStakeKeyHash)
       (adaInValue, otherValue) = valueSplitAda fundValue
 
   -- We want this new user to have at least 5 ada if we want to create collateral.
@@ -143,36 +150,52 @@ newTempUserCtx ctx fundUser fundValue CreateUserConfig {..} = do
       mustHaveOutput (mkGYTxOutNoDatum newAddr fundValue)
 
   void $ submitTx ctx fundUser txBody
-  return $ User {userPaymentSKey = newPaymentSKey, userAddr = newAddr, userStakeSKey = newStakeSKey}
+  return $ Wallet {walletPaymentSigningKey = newPaymentSKey, walletStakeSigningKey = newStakeSKey, walletAddress = newAddr}
 
 
-ctxRunF :: forall t v. Traversable t => Ctx -> User -> GYTxMonadNode (t (GYTxSkeleton v)) -> IO (t GYTxBody)
-ctxRunF ctx User {..} =  runGYTxMonadNodeF GYRandomImproveMultiAsset GYPrivnet (ctxProviders ctx) [userAddr] userAddr Nothing
+ctxRunF :: forall t v. Traversable t => Ctx -> Wallet -> GYTxMonadNode (t (GYTxSkeleton v)) -> IO (t GYTxBody)
+ctxRunF ctx w =  runGYTxMonadNodeF GYRandomImproveMultiAsset (ctxNetworkId ctx) (ctxProviders ctx) [userAddr] userAddr Nothing
+  where
+    userAddr = walletAddress w
 
-ctxRunFWithStrategy :: forall t v. Traversable t => GYCoinSelectionStrategy -> Ctx -> User -> GYTxMonadNode (t (GYTxSkeleton v)) -> IO (t GYTxBody)
-ctxRunFWithStrategy strat ctx User {..} =  runGYTxMonadNodeF strat GYPrivnet (ctxProviders ctx) [userAddr] userAddr Nothing
+ctxRunFWithStrategy :: forall t v. Traversable t => GYCoinSelectionStrategy -> Ctx -> Wallet -> GYTxMonadNode (t (GYTxSkeleton v)) -> IO (t GYTxBody)
+ctxRunFWithStrategy strat ctx w =  runGYTxMonadNodeF strat (ctxNetworkId ctx) (ctxProviders ctx) [userAddr] userAddr Nothing
+  where
+    userAddr = walletAddress w
 
 -- | Variant of `ctxRunF` where caller can also give the UTxO to be used as collateral.
 ctxRunFWithCollateral :: forall t v. Traversable t
                       => Ctx
-                      -> User
+                      -> Wallet
                       -> GYTxOutRef  -- ^ Reference to UTxO to be used as collateral.
                       -> Bool        -- ^ To check whether this given collateral UTxO has value of exact 5 ada? If it doesn't have exact 5 ada, it would be ignored.
                       -> GYTxMonadNode (t (GYTxSkeleton v))
                       -> IO (t GYTxBody)
-ctxRunFWithCollateral ctx User {..} coll toCheck5Ada =  runGYTxMonadNodeF GYRandomImproveMultiAsset GYPrivnet (ctxProviders ctx) [userAddr] userAddr $ Just (coll, toCheck5Ada)
+ctxRunFWithCollateral ctx w coll toCheck5Ada =  runGYTxMonadNodeF GYRandomImproveMultiAsset (ctxNetworkId ctx) (ctxProviders ctx) [userAddr] userAddr $ Just (coll, toCheck5Ada)
+  where
+    userAddr = walletAddress w
 
-ctxRunC :: forall a. Ctx -> User -> GYTxMonadNode a -> IO a
+ctxRunC :: forall a. Ctx -> Wallet -> GYTxMonadNode a -> IO a
 ctxRunC = coerce (ctxRunF @(Const a))
 
-ctxRunCWithStrategy :: forall a. GYCoinSelectionStrategy -> Ctx -> User -> GYTxMonadNode a -> IO a
+ctxRunCWithStrategy :: forall a. GYCoinSelectionStrategy -> Ctx -> Wallet -> GYTxMonadNode a -> IO a
 ctxRunCWithStrategy = coerce (ctxRunFWithStrategy @(Const a))
 
-ctxRunI :: Ctx -> User -> GYTxMonadNode (GYTxSkeleton v) -> IO GYTxBody
+ctxRunI :: Ctx -> Wallet -> GYTxMonadNode (GYTxSkeleton v) -> IO GYTxBody
 ctxRunI = coerce (ctxRunF @Identity)
 
-ctxRunIWithStrategy :: GYCoinSelectionStrategy -> Ctx -> User -> GYTxMonadNode (GYTxSkeleton v) -> IO GYTxBody
+ctxRunIWithStrategy :: GYCoinSelectionStrategy -> Ctx -> Wallet -> GYTxMonadNode (GYTxSkeleton v) -> IO GYTxBody
 ctxRunIWithStrategy = coerce (ctxRunFWithStrategy @Identity)
+
+{- | Evaluate 'GYTxMonadNode' under 'Ctx' _with no collateral specified_.
+
+The evaluation result of this function will *only* be consistent with 'ctxRunF' family of
+functions _if and only if_ the arguments are *equivalent*.
+-}
+ctxEval :: Ctx -> Wallet -> GYTxMonadNode a -> IO a
+ctxEval ctx w = evalGYTxMonadNode (ctxNetworkId ctx) (ctxProviders ctx) [userAddr] userAddr Nothing
+  where
+    userAddr = walletAddress w
 
 ctxSlotOfCurrentBlock :: Ctx -> IO GYSlot
 ctxSlotOfCurrentBlock (ctxProviders -> providers) =
@@ -187,9 +210,9 @@ ctxWaitUntilSlot (ctxProviders -> providers) slot = void $ gyWaitUntilSlot provi
 ctxSlotConfig :: Ctx -> IO GYSlotConfig
 ctxSlotConfig (ctxProviders -> providers) = gyGetSlotConfig providers
 
-ctxQueryBalance :: Ctx -> User -> IO GYValue
+ctxQueryBalance :: Ctx -> Wallet -> IO GYValue
 ctxQueryBalance ctx u = ctxRunC ctx u $ do
-    queryBalance $ userAddr u
+    queryBalance $ walletAddress u
 
 ctxProviders :: Ctx -> GYProviders
 ctxProviders ctx = GYProviders
@@ -203,21 +226,117 @@ ctxProviders ctx = GYProviders
     , gyGetStakeAddressInfo = nodeStakeAddressInfo (ctxInfo ctx)
     }
 
-submitTx :: Ctx -> User -> GYTxBody -> IO GYTxId
-submitTx ctx User {..} txBody = do
+newtype GYPrivnetMonad a = GYPrivnetMonad (ReaderT Ctx (ReaderT Wallet (StateT GYTxRunState IO)) a)
+  deriving newtype ( Functor
+                   , Applicative
+                   , Monad
+                   , MonadReader Ctx
+                   , MonadState GYTxRunState
+                   , MonadIO
+                   )
+
+runGYPrivnet :: Ctx -> Wallet -> GYPrivnetMonad a -> IO a
+runGYPrivnet ctx w = fmap fst . runGYPrivnet' ctx w (GYTxRunState mempty)
+
+runGYPrivnet' :: Ctx -> Wallet -> GYTxRunState -> GYPrivnetMonad a -> IO (a, GYTxRunState)
+runGYPrivnet' ctx w st (GYPrivnetMonad act) = do
+    flip runStateT st $ runReaderT (runReaderT act ctx) w
+
+instance MonadError GYTxMonadException GYPrivnetMonad where
+  throwError = liftIO . throwIO
+  catchError act handler = GYPrivnetMonad $ do
+      ctx <- ask
+      w <- lift ask
+      s <- get
+      (res, s') <- liftIO $ catch
+          (runGYPrivnet' ctx w s act)
+          (runGYPrivnet' ctx w s . handler)
+      put s'
+      pure res
+
+fromGYTxMonadNode :: GYTxMonadNode a -> GYPrivnetMonad a
+fromGYTxMonadNode act = do
+    ctx <- ask
+    w <- GYPrivnetMonad $ lift ask
+    liftIO $ ctxEval ctx w act
+
+instance GYTxQueryMonad GYPrivnetMonad where
+    networkId = fromGYTxMonadNode networkId
+    lookupDatum = fromGYTxMonadNode . lookupDatum
+    utxoAtTxOutRef = fromGYTxMonadNode . utxoAtTxOutRef
+    utxoAtTxOutRefWithDatum = fromGYTxMonadNode . utxoAtTxOutRefWithDatum
+    utxosAtTxOutRefs = fromGYTxMonadNode . utxosAtTxOutRefs
+    utxosAtTxOutRefsWithDatums = fromGYTxMonadNode . utxosAtTxOutRefsWithDatums
+    utxosAtAddress addr = fromGYTxMonadNode . utxosAtAddress addr
+    utxosAtAddressWithDatums addr = fromGYTxMonadNode . utxosAtAddressWithDatums addr
+    utxosAtAddresses = fromGYTxMonadNode . utxosAtAddresses
+    utxosAtAddressesWithDatums = fromGYTxMonadNode . utxosAtAddressesWithDatums
+    utxoRefsAtAddress = fromGYTxMonadNode . utxoRefsAtAddress
+    utxosAtPaymentCredential cred = fromGYTxMonadNode . utxosAtPaymentCredential cred
+    utxosAtPaymentCredentialWithDatums cred = fromGYTxMonadNode . utxosAtPaymentCredentialWithDatums cred
+    utxosAtPaymentCredentials = fromGYTxMonadNode . utxosAtPaymentCredentials
+    utxosAtPaymentCredentialsWithDatums = fromGYTxMonadNode . utxosAtPaymentCredentialsWithDatums
+    stakeAddressInfo = fromGYTxMonadNode . stakeAddressInfo
+    slotConfig = fromGYTxMonadNode slotConfig
+    slotOfCurrentBlock = fromGYTxMonadNode slotOfCurrentBlock
+    logMsg ns sev = fromGYTxMonadNode . logMsg ns sev
+
+instance GYTestMonad GYPrivnetMonad where
+    runWallet w (GYPrivnetMonad act) = GYPrivnetMonad $ do
+        ctx <- ask
+        lift . lift $ runReaderT (runReaderT (put (GYTxRunState mempty) >> act) ctx) w
+    sendSkeleton skeleton = do
+        ctx <- ask
+        user <- GYPrivnetMonad $ lift ask
+        txBodyPlace <- liftIO $ ctxRunI ctx user (pure skeleton)
+        apiPp       <- liftIO $ gyGetProtocolParameters $ ctxProviders ctx
+
+        pp <- case Api.toLedgerPParams Api.ShelleyBasedEraBabbage apiPp of
+                Left e   -> liftIO $ throwIO $ BuildTxPPConversionError e
+                Right pp -> pure pp
+
+        modify (updateWalletState user pp txBodyPlace)
+
+        liftIO $ submitTx_ ctx user txBodyPlace
+      where
+        -- Updates the wallet state.
+        -- Updates extra lovelace required for fees & minimum ada requirements against the wallet sending this transaction.
+        updateWalletState :: Wallet -> AlonzoCore.PParams (Api.S.ShelleyLedgerEra Api.S.BabbageEra) -> GYTxBody -> GYTxRunState -> GYTxRunState
+        updateWalletState w pp body GYTxRunState {..} = GYTxRunState $ Map.insertWith mappend (walletAddress w) v walletExtraLovelace
+          where
+            v = ( coerce $ txBodyFee body
+                , coerce $ flip valueAssetClass GYLovelace $
+                    foldMap'
+                      (\o ->
+                        -- If this additional ada is coming back to one's own self, we need not account for it.
+                        if gyTxOutAddress o == walletAddress w then
+                          mempty
+                        else gyTxOutValue (adjustTxOut (minimumUTxO pp) o) `valueMinus` gyTxOutValue o
+                      ) $ gytxOuts skeleton
+                )
+
+submitTx :: Ctx -> Wallet -> GYTxBody -> IO GYTxId
+submitTx ctx w = fmap snd . submitTx_ ctx w
+
+submitTx_ :: Ctx -> Wallet -> GYTxBody -> IO (GYTx, GYTxId)
+submitTx_ ctx Wallet {..} txBody = do
     let reqSigs = txBodyReqSignatories txBody
         tx =
           signGYTxBody' txBody $
-            case userStakeSKey of
-              Nothing -> [GYSomeSigningKey userPaymentSKey]
+            case walletStakeSigningKey of
+              Nothing -> [GYSomeSigningKey walletPaymentSigningKey]
               -- It might be the case that @cardano-api@ is clever enough to not add signature if it is not required but cursory look at their code suggests otherwise.
-              Just stakeKey -> if Set.member (toPubKeyHash . stakeKeyHash . stakeVerificationKey $ stakeKey) reqSigs then [GYSomeSigningKey userPaymentSKey, GYSomeSigningKey stakeKey] else [GYSomeSigningKey userPaymentSKey]
-    submitTx' ctx tx
+              Just stakeKey -> if Set.member (toPubKeyHash . stakeKeyHash . stakeVerificationKey $ stakeKey) reqSigs then [GYSomeSigningKey walletPaymentSigningKey, GYSomeSigningKey stakeKey] else [GYSomeSigningKey walletPaymentSigningKey]
+    txId <- submitTx' ctx tx
+    pure (tx, txId)
 
 submitTx' :: Ctx -> GYTx -> IO GYTxId
 submitTx' ctx@Ctx { ctxInfo } tx = do
     txId <- nodeSubmitTx ctxInfo tx
-    gyAwaitTxConfirmed (ctxProviders ctx) (GYAwaitTxParameters { maxAttempts = 30, checkInterval = 1_000_000, confirmations = 0 }) txId
+    gyAwaitTxConfirmed
+      (ctxProviders ctx)
+      (GYAwaitTxParameters { maxAttempts = 30, checkInterval = 1_000_000, confirmations = 0 })
+      txId
     return txId
 
 -- | Function to find for the first locked output in the given `GYTxBody` at the given `GYAddress`.
@@ -229,7 +348,7 @@ findOutput addr txBody = do
 
 -- | Function to add for a reference script. It adds the script in so called "Always failing" validator so that it won't be later possible to spend this output. There is a slight optimisation here in that if the desired reference script already exists then we don't add another one and return the reference for the found one else, we create a new one.
 addRefScriptCtx :: Ctx                 -- ^ Given context.
-                -> User                -- ^ User which will execute the transaction (if required).
+                -> Wallet                -- ^ Wallet which will execute the transaction (if required).
                 -> GYScript 'PlutusV2  -- ^ Given script.
                 -> IO GYTxOutRef       -- ^ Returns the reference for the desired output.
 addRefScriptCtx ctx user script = do
@@ -246,7 +365,7 @@ addRefScriptCtx ctx user script = do
 
 -- | Function to add for a reference input.
 addRefInputCtx :: Ctx            -- ^ Given context.
-               -> User           -- ^ User which will execute this transaction.
+               -> Wallet           -- ^ Wallet which will execute this transaction.
                -> Bool           -- ^ Whether to inline the datum.
                -> GYAddress      -- ^ Address to put this output at.
                -> GYDatum        -- ^ The datum to put.
