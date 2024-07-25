@@ -23,6 +23,8 @@ module GeniusYield.TxBuilder.Class
     , buildTxBodyParallel
     , buildTxBodyChaining
     , waitNSlots
+    , waitNSlots_
+    , waitUntilSlot_
     , submitTx_
     , submitTxConfirmed
     , submitTxConfirmed_
@@ -130,10 +132,12 @@ import qualified PlutusLedgerApi.V1           as Plutus (Address, DatumHash,
                                                          TxOutRef, Value)
 import qualified PlutusLedgerApi.V1.Value     as Plutus (AssetClass)
 
+-- NOTE: The 'Default (TxBuilderStrategy m)' constraint is not necessary, but it is usually desired everytime
+-- someone is building transactions with the below machinery.
 -- | Class of monads for building transactions. This can be default derived if the requirements are met.
 -- Specifically, set 'TxBuilderStrategy' to 'GYCoinSelectionStrategy' if you wish to use the default in-house
 -- transaction building implementation.
-class (GYTxSpecialQueryMonad m, GYTxUserQueryMonad m) => GYTxBuilderMonad m where
+class (Default (TxBuilderStrategy m), GYTxSpecialQueryMonad m, GYTxUserQueryMonad m) => GYTxBuilderMonad m where
     type TxBuilderStrategy m :: Type
     type TxBuilderStrategy m = GYCoinSelectionStrategy
 
@@ -152,7 +156,7 @@ class (GYTxSpecialQueryMonad m, GYTxUserQueryMonad m) => GYTxBuilderMonad m wher
                                     -> m GYTxBody
     buildTxBodyWithStrategy = buildTxBodyWithStrategy'
 
-    {- | A multi 'GYTxSkeleton' builder.
+    {- | A multi 'GYTxSkeleton' builder. The result containing built bodies must be in the same order as the skeletons.
 
     This does not perform chaining, i.e does not use utxos created by one of the given transactions in the next one.
     However, it does ensure that the balancer does not end up using the same own utxos when building multiple
@@ -167,7 +171,7 @@ class (GYTxSpecialQueryMonad m, GYTxUserQueryMonad m) => GYTxBuilderMonad m wher
                                     -> m GYTxBuildResult
     buildTxBodyParallelWithStrategy = buildTxBodyParallelWithStrategy'
 
-    {- | A chaining 'GYTxSkeleton' builder.
+    {- | A chaining 'GYTxSkeleton' builder. The result containing built bodies must be in the same order as the skeletons.
 
     This will perform chaining, i.e it will use utxos created by one of the given transactions, when building the next one.
 
@@ -181,15 +185,15 @@ class (GYTxSpecialQueryMonad m, GYTxUserQueryMonad m) => GYTxBuilderMonad m wher
     buildTxBodyChainingWithStrategy = buildTxBodyChainingWithStrategy'
 
 -- | 'buildTxBodyWithStrategy' with the default coin selection strategy.
-buildTxBody :: (Default (TxBuilderStrategy m), GYTxBuilderMonad m) => GYTxSkeleton v -> m GYTxBody
+buildTxBody :: GYTxBuilderMonad m => GYTxSkeleton v -> m GYTxBody
 buildTxBody = buildTxBodyWithStrategy def
 
 -- | 'buildTxBodyParallelWithStrategy' with the default coin selection strategy.
-buildTxBodyParallel :: (Default (TxBuilderStrategy m), GYTxBuilderMonad m) => [GYTxSkeleton v] -> m GYTxBuildResult
+buildTxBodyParallel :: GYTxBuilderMonad m => [GYTxSkeleton v] -> m GYTxBuildResult
 buildTxBodyParallel = buildTxBodyParallelWithStrategy def
 
 -- | 'buildTxBodyChainingWithStrategy' with the default coin selection strategy.
-buildTxBodyChaining :: (Default (TxBuilderStrategy m), GYTxBuilderMonad m) => [GYTxSkeleton v] -> m GYTxBuildResult
+buildTxBodyChaining :: GYTxBuilderMonad m => [GYTxSkeleton v] -> m GYTxBuildResult
 buildTxBodyChaining = buildTxBodyChainingWithStrategy def
 
 -- | Class of monads for interacting with the blockchain using transactions.
@@ -265,6 +269,10 @@ Just one type inference (or signature) on the top most call that runs the 'GYTxG
 will be automatically inferred.
 -}
 
+-- | > waitUntilSlot_ = void . waitUntilSlot
+waitUntilSlot_ :: GYTxGameMonad m => GYSlot -> m ()
+waitUntilSlot_ = void . waitUntilSlot
+
 -- | Wait until the chain tip has progressed by N slots.
 waitNSlots :: GYTxGameMonad m => Word64 -> m GYSlot
 waitNSlots (slotFromWord64 -> n) = do
@@ -273,6 +281,10 @@ waitNSlots (slotFromWord64 -> n) = do
     waitUntilSlot . slotFromApi $ currentSlot `addSlots` n
   where
     addSlots = (+) `on` slotToApi
+
+-- | > waitNSlots_ = void . waitNSlots
+waitNSlots_ :: GYTxGameMonad m => Word64 -> m ()
+waitNSlots_ = void . waitNSlots
 
 -- | > submitTx_ = void . submitTx
 submitTx_ :: GYTxMonad m => GYTx -> m ()
@@ -342,7 +354,8 @@ instance is expected to have its own unique 'GYTxMonad' instance. So
 instance.
 
 The solution to this is to simply have a wrapper data type that brings generativity to the table.
-Such as 'data ReaderTTxMonad m a = ReaderTTxMonad ((TxMonadOf m) a)' or similar.
+Such as 'data ReaderTTxMonad m a = ReaderTTxMonad ((TxMonadOf m) a)' or similar. See
+"GeniusYield.Test.FeeTracker.FeeTrackerGame" for a tutorial on how to do this.
 
 Since these wrapper data types are usage specific, and 'GYTxGameMonad' instances are meant to be some
 "overarching base" type, we do not provide these instances and users may define them if necessary.
